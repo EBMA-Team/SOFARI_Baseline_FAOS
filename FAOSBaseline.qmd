@@ -1,0 +1,2363 @@
+---
+title: "Pain, symptoms and quality of life in foot and ankle pathology: A cross-sectional analysis of the SOFARI Registry"
+author: "Corey Scholes"
+affiliation: "EBM Analytics"
+version: 1.0
+date: "2025-Jul-07"
+date-modified: "2025-Jul-07"
+type: website
+editor: visual
+code-annotations: true
+execute: 
+  echo: true
+  warning: false
+  message: false
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: true
+    
+bibliography: FAOS references.bib
+---
+
+# Analysis Preamble
+
+This analysis is to assess the variation in patient-reported outcome measure (PROM) scores across foot and ankle pathology captured in a multi-surgeon patient registry.
+
+## Reporting
+
+The study was reported according to the RECORD guidelines [@Benchimol2015] and companion checklist.
+
+The analysis was conducted in RStudio IDE (RStudio 2024.12.0+467 "Kousa Dogwood" Release) using *Rbase* [@base], *quarto* [@quarto] and attached packages to perform the following;
+
+-   Data import and preparation
+
+-   Sample selection
+
+-   Describe and address missingness
+
+-   Data manipulation, modelling and visualisation of;
+
+    -   Patient characteristics
+
+    -   Pathology characteristics (diagnosis)
+
+    -   Management and surgical technique
+
+    -   Treatment and repair survival
+
+    -   Adverse events and complications
+
+    -   Patient reported outcomes
+
+-   Publish to posit connect for dissemination
+
+## Preparation
+
+Load up required packages in advance. Citations are applied to each library at first use in the text. <!--# Reorder these in order of general appearance -->
+
+```{r}
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  "knitr",
+  "cardx",
+  "quarto",
+  "pROC",
+  "reshape",
+  "future",
+  "furrr",
+  "memoise",
+  "gargle",
+  "googledrive",
+  "googlesheets4",
+  "openxlsx2",
+  "readr",
+  "purrr",
+  "tidyverse",
+  "tidymodels",
+  "tidytext",
+  "stopwords",
+  "tictoc",
+  "lubridate",
+  "forcats",
+  "gt",
+  "consort",
+  "gtsummary",
+  "flextable",
+  "survival",
+  "ggplot2",
+  "ggdist",
+  "ggsurvfit",
+  "ggfortify",
+  "mice",
+  "marginaleffects",
+  "patchwork",
+  "naniar",
+  "quantreg",
+  "broom",
+  "broom.helpers",
+  "labelled",
+  "epoxy",
+  "broom.mixed",
+  "lme4",
+  "janitor",
+  "progressr",
+  "DT",
+  install = TRUE,
+  update = FALSE
+)
+
+```
+
+## Authorisations
+
+Pre-authorise access to registry datasets using the *gargle* package (v`{r} utils::packageVersion("gargle")`) [@gargle].
+
+```{r, echo = FALSE}
+
+# Set the cache location
+options(gargle_oauth_cache = ".secrets")
+
+# Use the saved token for non-interactive auth
+drive_auth(email = "cscholes@ebma.com.au", 
+          cache = ".secrets")
+```
+
+```{r, echo = FALSE}
+
+options(
+  gargle_oauth_cache = ".secrets",
+  gargle_oauth_email = TRUE
+)
+
+drive_auth(cache = ".secrets", email = TRUE)
+```
+
+## Functions for Processing
+
+Include a series of functions to call later in the file for processing data imports.
+
+Function to retrieve files, using *googledrive* package(v`{r} utils::packageVersion("googledrive")`) [@googledrive].
+
+```{r, echo = FALSE}
+
+base_folder_id1 <- "1ldAFbv_g6zoF14_zt0HHQzft4pxgBY3O"
+
+```
+
+```{r}
+get_latest_snapshot <- function(base_folder_id = base_folder_id1) {
+  tryCatch({
+    # List all folders in the base directory
+    folders <- googledrive::drive_ls(as_id(base_folder_id), pattern = "^\\d{8}$")
+    
+    if(nrow(folders) == 0) {
+      stop("No dated folders found")
+    }
+    
+    # Sort folders by name (date) in descending order
+    latest_folder <- folders[order(folders$name, decreasing = TRUE),][1,]
+    
+    # Find the snapshot file in the latest folder
+    snapshot_file <- googledrive::drive_ls(
+      latest_folder$id, 
+      pattern = "Registry data snapshot\\.xlsx$"
+    )
+    
+    if(nrow(snapshot_file) == 0) {
+      stop("No snapshot file found in latest folder")
+    }
+    
+    # Return both pieces of information as a list
+    return(list(
+      snapshot = snapshot_file,
+      folder_name = latest_folder$name
+    ))
+    
+  }, error = function(e) {
+    stop(paste("Error finding latest snapshot:", e$message))
+  })
+}
+```
+
+A general text cleaning function was constructed to apply during first import of raw data files, built on *tidyverse* (v`{r} utils::packageVersion("tidyverse")`) [@tidyverse-2] and *stringr* (v`{r} utils::packageVersion("stringr")`) [@stringr-2]. The *janitor* package (v`{r} utils::packageVersion("janitor")`) [@janitor] was utilised to clean column names in the resulting dataframe.
+
+```{r}
+# Generalized text cleaning function
+clean_text <- function(text) {
+  text |> 
+    stringr::str_to_lower() |>
+    stringr::str_squish() |>
+    stringr::str_replace_all("\\.|\\. |\\: |\\, |w\\/", "; ") |>
+    stringr::str_replace_all(";+", "; ") |>
+    stringr::str_remove_all("^;|;$")
+}
+
+```
+
+```{r}
+bind_and_clean <- function(df1, df2, cols = NULL, clean_cols = NULL, clean_fn = clean_text) {
+  # Store the names of the input dataframes
+  df1_name <- deparse(substitute(df1))
+  df2_name <- deparse(substitute(df2))
+  
+  # Bind rows
+  result <- bind_rows(df1, df2)
+  
+  # If cols is specified, select those columns, otherwise keep all columns
+  if (!is.null(cols)) {
+    result <- result |> dplyr::select(all_of(cols))
+  }
+  
+  # Apply text cleaning to specified columns
+  if (!is.null(clean_cols)) {
+    for (col in clean_cols) {
+      if (col %in% names(result)) {
+        result[[col]] <- clean_fn(result[[col]])
+      } else {
+        warning(glue::glue("Column '{col}' not found in dataframe"))
+      }
+    }
+  }
+  
+  # Remove the input dataframes from the parent environment
+  rm(list = c(df1_name, df2_name), envir = parent.frame())
+  
+  # Clean column names for consistency
+  result |> janitor::clean_names(
+    case = "big_camel"
+  )
+}
+
+```
+
+### Diagnosis
+
+Include a series of functions for calling later in the file to process sub-phases of converting clinical text stored in the registry to categories of pathology affecting the foot and ankle. The functions were built on *tidyverse* and *stringr* packages to manipulate data, *future* (v`{r} utils::packageVersion("future")`) [@future] and *furrr* (v`{r} utils::packageVersion("furrr")`) [@furrr] to enable distributed processing of the records. The *progressr* package (v`{r} utils::packageVersion("progressr")`) [@progressr] was utlised to enable visual progress to be communicated during processing and *memoise* (v`{r} utils::packageVersion("memoise")`) [@memoise]to cache processing results from batches of subsets of the registry dataset to enable distributed processing.
+
+```{r}
+
+# Enable parallel processing
+future::plan(multisession)
+
+# Configure progress reporting
+progressr::handlers("progress")
+
+# Create a shared cache (in memory or filesystem)
+shared_cache <- memoise::cache_memory()
+
+# Memoize the target terms loading to match original format
+load_target_terms <- memoise::memoise(function(sheet_url, sheet_name = "DiagTerm", range = "A1:C") {
+  terms <- googlesheets4::range_read(
+    ss = sheet_url,
+    sheet = sheet_name,
+    range = range,
+    col_names = TRUE,
+    trim_ws = TRUE
+  ) |> 
+    mutate(TargetTerm = paste0("\\b", stringr::str_escape(Term), "\\b"))
+  
+  list(
+    terms = terms,
+    pattern = str_c(terms$TargetTerm, collapse = "|")
+  )
+})
+
+# Target-Replacement Function
+create_replace_function <- function(target_terms_df) {
+  function(string) {
+    # Find the matched term in target_terms_df
+    match <- filter(target_terms_df, Term == string)
+    
+    # Check if a match is found
+    if (nrow(match) == 1) {
+      return(match$ReplaceTerm)
+    } else {
+      # Return the original string if no match is found
+      return(string)
+    }
+  }
+}
+
+clean_diagnosis_text <- memoise::memoise (function(df) {
+  df |> 
+    dplyr::select(TreatmentID, DiagnosisRawFinal, DiagnosisRawPrelim) |> 
+    tidyr::unite("DiagnosisRaw", c(DiagnosisRawFinal, DiagnosisRawPrelim), 
+          na.rm = TRUE, remove = FALSE, sep = "; ") |> 
+    filter(stringr::str_count(str_to_lower(DiagnosisRaw), "") > 1) |> 
+    mutate(
+      DiagnosisRaw = stringr::str_squish(DiagnosisRaw),
+      DiagnosisRaw = stringr::str_replace_all(DiagnosisRaw, "\\.|\\. |\\: |\\, |w\\/", ";"),
+      DiagnosisRaw = stringr::str_replace_all(DiagnosisRaw, "\\#", "fracture"),
+      DiagnosisRaw = stringr::str_replace_all(DiagnosisRaw, ";+", ";"),
+      DiagnosisRaw = stringr::str_trim(stringr::str_remove_all(DiagnosisRaw, "^;|;$"))
+    )
+})
+
+# Modified process_batch1 to maintain sequence integrity
+process_batch1 <- function(batch_df) {
+  batch_df |> 
+    mutate(
+      DiagnosisRaw1 = stringr::str_replace_all(
+        str_to_lower(DiagnosisRaw), 
+        "\\bwith\\b|\\band\\b|\\bas well as\\b", ";"
+      ),
+      DiagnosisRaw1 = stringr::str_replace_all(DiagnosisRaw1, "\\s+", " "),
+      DiagnosisRaw1 = stringr::str_trim(DiagnosisRaw1)
+    ) |> 
+    tidyr::separate_rows(DiagnosisRaw1, sep = ";") |> 
+    mutate(
+      DiagnosisRaw1 = stringr::str_trim(DiagnosisRaw1),
+      # Add row identifier before unnesting
+      SequenceID = row_number()
+    ) |> 
+    filter(nchar(DiagnosisRaw1) > 0) |>
+    tidytext::unnest_tokens(
+      output = Term,
+      input = DiagnosisRaw1,
+      token = "regex",
+      pattern = "\\s+",
+      format = "text",
+      to_lower = TRUE,
+      drop = FALSE
+    ) |>
+    anti_join(stop_words, by = c("Term" = "word")) |>
+    mutate(
+      TermLength = stringr::str_length(Term),
+      # Maintain original ordering within each diagnosis
+      term_sequence = row_number()
+    ) |>
+    group_by(TreatmentID, SequenceID) |>
+    mutate(
+      term_count = n(),
+      term_position = row_number()
+    ) |>
+    ungroup()
+}
+
+# Modified process_batch2 to preserve sequence information
+process_batch2 <- function(batch_df, target_terms) {
+  replace_function <- create_replace_function(target_terms$terms)
+  
+  batch_df |> 
+    mutate(
+      Term1 = stringr::str_replace_all(Term, target_terms$pattern, replace_function)
+    ) |> 
+    filter(
+      stringr::str_detect(
+        Term1, 
+        "\\d+(?!(?:st|nd|rd|th)\\b)|(left|right)", 
+        negate = TRUE
+      )
+    ) |>
+    # Preserve grouping and sequence
+    arrange(TreatmentID, SequenceID, term_position)
+}
+
+# Modified tokenize_diagnosis to handle sequence preservation
+tokenize_diagnosis <- memoise::memoise(function(df, stop_words = NULL, batch_size = 500, process_batch) {
+  if (is.null(stop_words)) {
+    stop_words <- tidytext::get_stopwords()
+  }
+  
+  if (missing(process_batch)) {
+    stop("You must provide a process_batch function.")
+  }
+  
+  # Add global identifier before splitting
+  df <- df |> mutate(global_id = row_number())
+  
+  # Split the data into batches
+  df_split <- split(df, ceiling(seq_len(nrow(df)) / batch_size))
+  
+  # Process batches while maintaining order
+  furrr::future_map_dfr(df_split, process_batch, .progress = TRUE) |>
+    arrange(global_id, term_position)
+})
+
+```
+
+```{r}
+# Term replacement logic
+apply_target_terms <- memoise::memoise(function(df, target_terms, batch_size = 500, process_batch) {
+  # Ensure `process_batch` is provided
+  if (missing(process_batch)) {
+    stop("You must provide a process_batch function.")
+  }
+  
+  # Split the data into batches
+  df_split <- split(df, ceiling(seq_len(nrow(df)) / batch_size))
+  
+  # Process each batch using the provided `process_batch` function
+  furrr::future_map_dfr(df_split, ~process_batch(.x, target_terms), .progress = TRUE)
+})
+```
+
+```{r}
+# Function to safely process diagnosis
+safe_process_diagnosis <- function(
+    snapshot_df,
+    target_terms_url,
+    stop_words = NULL,
+    batch_size = 1000,
+    tokenize_batch = process_batch1,
+    term_batch = process_batch2,
+    workers = 4
+    ) {    # Add workers parameter
+  
+  # Set up parallel processing
+  old_plan <- plan(multisession, workers = workers)
+  on.exit(plan(old_plan), add = TRUE)  # Ensure we reset the plan when done
+  
+  # Set up progress handling
+  handlers("progress")
+  
+  tryCatch({
+    with_progress({
+      p <- progressor(steps = 4)
+      
+      # Load target terms
+      p(message = "Loading target terms...")
+      terms_data <- load_target_terms(target_terms_url)
+      
+      # Process the diagnosis data with progress updates
+      p(message = "Cleaning text...")
+      cleaned_data <- clean_diagnosis_text(snapshot_df)
+      
+      # Ensure stop_words is available
+      if (is.null(stop_words)) {
+        stop_words <- tidytext::get_stopwords()
+      }
+      
+      # Create the tokenize batch function closure
+      tokenize_batch_fn <- function(batch_df) {
+        process_batch1(batch_df)
+      }
+      
+      environment(tokenize_batch_fn)$stop_words <- stop_words
+      
+      p(message = "Tokenizing diagnosis...")
+      tokenized_data <- tokenize_diagnosis(
+        df = cleaned_data, 
+        stop_words = stop_words,
+        batch_size = batch_size,
+        process_batch = tokenize_batch_fn
+      )
+      
+      p(message = "Applying target terms...")
+      processed_data <- apply_target_terms(
+        df = tokenized_data, 
+        target_terms = terms_data,
+        batch_size = batch_size,
+        process_batch = term_batch
+      )
+      
+      processed_data
+    })
+  }, error = function(e) {
+    message("Error in processing: ", e$message)
+    # Clean up any remaining connections or resources
+    future:::ClusterRegistry("stop")
+    stop(e)
+  })
+}
+
+
+```
+
+Function to conduct categorisation of terms for pathology (diagnosis) stored in the registry.
+
+```{r}
+#' Categorize medical diagnoses with anatomical and pathological classifications
+#' @param df A dataframe containing Term2 columns
+#' @param remove_intermediate Logical, whether to remove intermediate processing columns
+#' @param use_parallel Logical, whether to use parallel processing for large datasets
+#' @param chunk_size Integer, number of rows to process in each parallel chunk
+#' @return A dataframe with new classification columns based on Term2 pattern matching
+categorize_diagnosis <- function(
+    df,
+    remove_intermediate = TRUE,
+    use_parallel = FALSE,
+    chunk_size = 1000
+    ) {
+  
+  # Input validation with more detailed error message
+  required_cols <- c("Term2")
+  if(!all(required_cols %in% names(df))) {
+    stop("Missing required column 'Term2'. Available columns are: ", 
+         paste(names(df), collapse = ", "))
+  }
+  
+  # Ensure df is a data.frame
+  df <- as.data.frame(df)
+  
+  # Main processing function
+  process_chunk <- function(chunk_df) {
+    # Ensure required packages are loaded in parallel context
+    require(dplyr)
+    require(stringr)
+    
+    # Convert chunk to data.frame to ensure consistent behavior
+    chunk_df <- as.data.frame(chunk_df)
+    
+    chunk_df |> 
+      # Extract diagnosis side
+      mutate(
+        # Anatomical classifications
+        Ankle = if_else(str_detect(chunk_df$Term2, "ankle|tibiotalar|\\bplafond\\b|dome|malleol*|weber|achilles|tendo-achilles|fibula|\\btibia\\b|gutter|perone*|syndesmo|gastrocnemius|talo-fibular|talofibular|calcaneofibular|calcaneo-fibular|gutter|(lateral|medial)\\s+ligament|tibia|deltoid|compartment.+syndrome") & str_detect(chunk_df$Term2,"(lateral|medial)\\s+collateral\\s+ligament", negate = TRUE),1,0),
+        
+        Rearfoot = if_else(str_detect(chunk_df$Term2, "\\btarsal\\b|\\btalar(?!\\s+dome)|talus|talonavic*|plantar|rearfoot|hindfoot|trigonum|hindfeet|tarsi|calcaneus|\\bcalcaneal\\b|heel|subtalar"),1,0),
+        
+        Midfoot = if_else(str_detect(chunk_df$Term2, "metatarsus|tarsometatarsal|tarso-metatarsal|\\bmetatarsal\\b|talonavicular|navicular|cuneiform|lisfranc|cuboid|midfoot|jones|chopart"),1,0),
+        
+        Forefoot = if_else(str_detect(chunk_df$Term2, "digit*|morton*|metatarsophalangeal|phalange*|phalanx|hallux|nail|forefoot|forefeet|bunionette|hallucis|onychomycosis|paronychia|bunion|hammertoe|claw|sesamoid"),1,0),
+        
+        Foot = if_else(str_detect(chunk_df$Term2, "\\bfeet\\b|\\bfoot\\b|cavovarus|equinovarus|equinus|pes|charcot|footdrop|neuropathy"),1,0)
+      ) |>
+      # Pathological classifications
+      mutate(
+        Arthritis = if_else(str_detect(chunk_df$Term2, "psoria|arthritis|osteoarthritis|rheumatoid|gout|erosion|arthropathy"),1,0),
+        
+        Injury = if_else(str_detect(chunk_df$Term2, "injury|injuries|axial|impact|crush|rotation|inversion|forced|accident|tear|torn|ruptur|avulsion|fracture|defect|(osteochondral|chondral|cartilage).+lesion|sprain|haemarthrosis|disruption|wound|laceration|penetrating|hernia|maisonneuve"), 1, 0),
+        
+        Deformity = if_else(str_detect(chunk_df$Term2, "malalignment|deformit|angulation|contracture|contraction|\\bvalgus\\b|varus|planovalgus|valgoplanus|dysfunction|extension|adductus|crossover|hammer|claw|bunionette|bunion|interphalangeus|(relatively|significantly).+long|relative.+long"),1,0),
+        
+        Metatarsalgia = if_else(str_detect(chunk_df$Term2, "metatarsalgia|forefoot.+overload"),1,0),
+        
+        SoftTissueDisorder = if_else(str_detect(chunk_df$Term2, "tenosynovitis|enthesopathy|teno-synovitis|tendinopathy|tendinitis|tendonitis|tendinosis|fasciosis|fasciitis|sesamoiditis|arthrofibro|scar|tibialis posterior.+dysfunction|dysfunction tibialis posterior"),1,0),
+        
+        Growth = if_else(str_detect(chunk_df$Term2, "cyst|ganglion|neuroma|malformation|fibroma|tumour|accessory|ingrown|in_grown|coalition|(?<!(?:chondral|osteochondral|cartilage)\\s)\\blesion\\b|xanthomas|osteoma|gioma|schwannoma|chondroma|lump|villonodular|callosity|corn|mass|\\b(non|mal|delayed)[-]?union|pseudo-articulation|bone.+loss|exostosis|spur|osteophyte|onychogryphosis|bipartite|neuroma|chondromatosis"), 1, 0),
+        
+        Neural = if_else(str_detect(chunk_df$Term2, "foot.+drop|footdrop|nerve|neuropathy|neural|sensory|charcot|motor|pain.+syndrome|tunnel.+syndrome|neuropathic|denervation"),1,0),
+        
+        Infection = if_else(str_detect(chunk_df$Term2, "infect|osteomyelitis|cellulitis|onychomycosis|ulcer|paronychia"),1,0),
+        
+        Impingement = if_else(str_detect(chunk_df$Term2, "impingement|stiffness|os.+trigonum"),1,0),
+        
+        Instability = if_else(str_detect(chunk_df$Term2, "disloc|unstable|sublux|instability|talar.+shift|widening|maisonneuve"),1,0)
+      ) |>
+      # Final classifications
+      mutate(
+        Other = if_else(rowSums(across(c(Arthritis:Instability))) < 1 | str_detect(chunk_df$Term2,"foreign.+(body|material)"),1,0),
+        NegatePathology = if_else(str_detect(chunk_df$Term2, "(?<!ab?)normal|(?<!(non|mal)-?)|nil.+pathology|\\bheal\\b|reduced|non-tender|unremarkable"),0,1)
+      )
+  }
+  
+  # Process data based on parallel preference
+  if (use_parallel && nrow(df) > chunk_size) {
+    # Ensure required packages are loaded in main session
+    require(future)
+    require(furrr)
+    
+    # Set up parallel processing
+    plan(multisession)
+    
+    # Create chunks with explicit data.frame conversion
+    chunks <- split(df, ceiling(seq_len(nrow(df))/chunk_size))
+    chunks <- lapply(chunks, as.data.frame)
+    
+    # Process chunks in parallel
+    df_processed <- future_map_dfr(chunks, process_chunk, .progress = TRUE)
+  } else {
+    df_processed <- process_chunk(df)
+  }
+  
+  return(df_processed)
+}
+
+# Create cached version
+categorize_diagnosis_cached <- memoise::memoise(categorize_diagnosis)
+```
+
+Concatenated terms for each treatment record using *tidyverse* syntax. Generated a method to cumulatively concatenate terms within a treatment record that have been split into text sequences delimited by punctuation (e.g. ";").
+
+```{r}
+concatenate_diagnoses <- function(data) {
+  # Sort the data by TreatmentID and SequenceRow in descending order
+  data %>%
+    arrange(TreatmentID, desc(SequenceRow)) %>%
+    group_by(TreatmentID) %>%
+    mutate(
+      CumulativeTerm = accumulate(Term2, 
+                                 .f = function(x, y) {
+                                   if (is.na(x)) y else paste(y, x, sep = "; ")
+                                 }) %>% 
+        last()
+    ) %>%
+    ungroup()
+}
+
+```
+
+```{r}
+
+concatenate_cumulative <- function(SequenceRow, ProductCuml, Term2) {
+  # Create a dataframe to help with tracking
+  df <- data.frame(
+    SequenceRow = SequenceRow, 
+    ProductCuml = ProductCuml, 
+    Term2 = Term2,
+    stringsAsFactors = FALSE
+  )
+  
+  # Sort by SequenceRow to ensure correct processing
+  df <- df[order(df$SequenceRow), ]
+  
+  # Initialize result vector
+  result <- character(length(SequenceRow))
+  
+  # Use accumulate to build up the terms
+  accumulated_result <- purrr::accumulate(
+    1:nrow(df), 
+    .init = list(
+      accumulated_terms = character(),
+      last_classified_term = NA_character_
+    ),
+    function(acc, i) {
+      # Current row details
+      current_term <- df$Term2[i]
+      current_product_cuml <- df$ProductCuml[i]
+      
+      # If current row is classified (ProductCuml >= 1)
+      if (current_product_cuml >= 1) {
+        # Concatenate all accumulated terms with current term
+        if (length(acc$accumulated_terms) > 0) {
+          combined_term <- str_c(
+            str_c(acc$accumulated_terms, collapse = "; "), 
+            current_term, 
+            sep = "; "
+          )
+        } else {
+          combined_term <- current_term
+        }
+        
+        # Return updated state
+        list(
+          accumulated_terms = character(),
+          last_classified_term = combined_term
+        )
+      } else {
+        # Accumulate terms for rows with ProductCuml < 1
+        list(
+          accumulated_terms = c(acc$accumulated_terms, current_term),
+          last_classified_term = acc$last_classified_term
+        )
+      }
+    }
+  )
+  
+  # Extract the last_classified_term for each row
+  result <- sapply(accumulated_result[-1], `[[`, "last_classified_term")
+  
+  # Ensure result matches original input order
+  result[order(SequenceRow)] <- result
+  
+  return(result)
+}
+
+```
+
+# Title and abstract
+
+<!--# Indicate the study’s design with a commonly used term in the title or the abstract. Provide in the abstract an informative and balanced summary of what was done and what was found -->
+
+The following working title is proposed - Pain catastrophizing in foot and ankle pathology: A cross-sectional analysis of patient-reported outcomes data from the SOFARI Registry.
+
+## Abstract
+
+Purpose: To replicate the findings of Hampton et al 2019, in assessing the pattern of pain catastrophizing in patients presenting for surgical review of foot and ankle pathology.
+
+Methods: A cross-sectional analysis was performed on data stored in a specialty, clinician-funded quality registry of four specialist practices in Sydney, Australia between Jun-2020 and Jan-2025.
+
+Results:
+
+Conclusion:
+
+## RECORD \[1.1\] Data Type
+
+<!--# RECORD 1.1: The type of data used should be specified in the title or abstract. When possible, the name of the databases used should be included. -->
+
+Data type included in Title.
+
+## RECORD \[1.2\] Geography and Timeframe
+
+<!--# RECORD 1.2: If applicable, the geographic region and timeframe within which the study took place should be reported in the title or abstract. -->
+
+Included in abstract.
+
+## RECORD \[1.3\] Data Linkage
+
+<!--# RECORD 1.3: If linkage between databases was conducted for the study, this should be clearly stated in the title or abstract -->
+
+No data linkage to another data was performed for this analysis.
+
+# Introduction
+
+## RECORD \[2\] Background/rationale
+
+<!--# Explain the scientific background and rationale for the investigation being reported -->
+
+## RECORD \[3\] Objectives
+
+<!--# State specific objectives, including any prespecified hypotheses -->
+
+Describe the pattern of pain, symptoms and quality of life in foot and ankle pathology in first-presentation (capture) to specialist private clinics in Sydney, Australia.
+
+# Methods
+
+## RECORD \[4\] Study design
+
+<!--# Present key elements of study design early in the paper -->
+
+Cross-sectional analysis of registry data.
+
+## RECORD \[5\] Setting
+
+<!--# Describe the setting, locations, and relevant dates, including periods of recruitment, exposure, follow-up, and data collection -->
+
+The SOFARI (Sydney Orthopaedic Foot and Ankle Research Institute) registry is a multi-site system based in Sydney, Australia. It commenced recruitment with one specialist in Jun-2020 and was expanded sequentially to three other specialists by Aug-2021.
+
+Patients were recruited in an opt-out consent model through electronic communication (sms, email) at the time of their initial consultation with their surgeon. Recruitment and data collection into the registry for the present analysis spans 6-Jun-2020 to 31-Jan-2025.
+
+## RECORD \[8\] Data sources/measurement
+
+<!--# For each variable of interest, give sources of data and details of methods of assessment (measurement). Describe comparability of assessment methods if there is more than one group -->
+
+Data was sourced directly from the SOFARI registry. Patient and treatment information were entered into the database through the registry interface and compiled into a data cube (snapshot) every quarter. Complications and adverse events captured into an online form (QuestionPro, USA) and linked using record identifier codes. Patient-reported outcomes were collected from the patient through electronic communication (sms, email) of a form link specific to baseline assessment and captured into an online form (QuestionPro, USA) for each questionnaire of interest. PROMs data were also linked back to patient and treatment infromation using record identifier codes.
+
+### Data Import and Preparation
+
+Data was retrieved and formatted using *openxlsx* [@openxlsx2] to retrieve static snapshot files and *googlesheets4* (v`{r} utils::packageVersion("googlesheets4")`) [@googlesheets4] to retrieve live database tables. Text and code output were integrated using the *epoxy* package (v`{r} utils::packageVersion("epoxy")`) [@epoxy].
+
+Source files were specified and stored as global variables to call on in further functions.
+
+```{r}
+#| echo: false
+
+SheetIDs <- list(
+  Complic1 = "https://docs.google.com/spreadsheets/d/1hs9AHor_cqEOzFBpXHLrcrb2Gs3Ot647g8aMYfax6Fw/edit",
+  Complic2 = "https://docs.google.com/spreadsheets/d/1nFMsHl_LEm4tVi7GGtArGWB3EkG3YE_rF5C-PUcAgMs/edit",
+  Patient1 = "https://docs.google.com/spreadsheets/d/1hs9AHor_cqEOzFBpXHLrcrb2Gs3Ot647g8aMYfax6Fw/edit",
+  Patient2 = "https://docs.google.com/spreadsheets/d/1nFMsHl_LEm4tVi7GGtArGWB3EkG3YE_rF5C-PUcAgMs/edit"
+  
+)
+
+```
+
+Read in complication tables, then combine and clean the text description of complications as required.
+
+```{r}
+
+# Authenticate for sheets using the same token
+gs4_auth(token = drive_token())
+
+ComplicTable1 <- googlesheets4::read_sheet(
+  ss = SheetIDs$Complic1,
+  sheet = "Complications",
+  range = "A2:AD",
+  col_names = TRUE,
+  col_types = "cccTlnicicccccccccccicccccDccD"
+  )
+
+ComplicTable2 <- range_read(
+  ss = SheetIDs$Complic2,
+  sheet = "Complications",
+  range = "A2:AD",
+  col_names = TRUE,
+  col_types = "cccTlnicicccccccccccicccccDccD"
+  )
+
+# Complication Table
+MasterComplic <- bind_and_clean(
+  df1 = ComplicTable1, 
+  df2 = ComplicTable2, 
+  cols = c(
+    "TreatmentID", 
+    "ComplicationID", 
+    "ComplicationOccurrence",
+    "ComplicationNature", 
+    "DateOfOccurrence",
+    "ComplicationTreatmentOffered",
+    "DateReoperation"),
+  clean_cols = "ComplicationNature",
+  clean_fn = clean_text  # Pass the function directly
+)
+
+```
+
+Read in patient tables, then combine and clean the text columns as required.
+
+```{r}
+
+
+# Authenticate for sheets using the same token
+gs4_auth(token = drive_token())
+
+PatientTable1 <- range_read(
+  ss = SheetIDs$Patient1,
+  sheet = "Patient",
+  col_names = c(
+  "PatientCreationDate",
+  "PatientID",
+  "LastName",
+  "FirstName",
+  "AlternateID",
+  "DateOfBirth",
+  "Sex",
+  "RegistryStatus",
+  "RegistryStatusNotes",
+  "DateRegistryStatus",
+  "NotificationMethod",
+  "NoTreatmentRecords",
+  "Email",
+  "Phone",
+  "Postcode",
+  "PatientRegistrationStatus",
+  "DatePatientRegistration",
+  "TrueNoTreatmentRecords"
+),
+range = "A6:R",
+col_types = "DccccDcccTciccccTi"
+)
+
+PatientTable2 <- range_read(
+  ss = SheetIDs$Patient2,
+  sheet = "Patient",
+  col_names = c(
+  "PatientCreationDate",
+  "PatientID",
+  "LastName",
+  "FirstName",
+  "AlternateID",
+  "DateOfBirth",
+  "Sex",
+  "RegistryStatus",
+  "RegistryStatusNotes",
+  "DateRegistryStatus",
+  "NotificationMethod",
+  "NoTreatmentRecords",
+  "Email",
+  "Phone",
+  "Postcode",
+  "PatientRegistrationStatus",
+  "DatePatientRegistration",
+  "TrueNoTreatmentRecords"
+),
+range = "A6:R",
+col_types = "DccccDcccTciccccTi")
+
+
+MasterPatient <- bind_rows(
+  PatientTable1,
+  PatientTable2
+) |> mutate(
+  AlternateID2 = stringr::str_remove(AlternateID,"MS1|MS2")
+) |> group_by(
+  PatientID
+) |> mutate(
+  RecordNum = row_number()
+) |> ungroup()
+
+rm(PatientTable1,
+  PatientTable2
+)
+```
+
+Process the registry snapshot by retrieving the file and use *tidyverse* to add columns, recode existing columns and create an additional identifier using *tidyr* (v`{r} utils::packageVersion("tidyr")`) [@tidyr], representing the patient and their side, to track multiple treatments for each limb. Dates were reformatted to a form appropriate for analysis using *lubridate* (v`{r} utils::packageVersion("lubridate")`) [@lubridate].
+
+```{r}
+# Get the latest snapshot file
+latest_snapshot <- get_latest_snapshot()
+# 
+# You can then use these in your subsequent code:
+temp_file <- tempfile(fileext = ".xlsx")
+drive_download(
+  file = latest_snapshot$snapshot$id,
+  path = temp_file,
+  overwrite = TRUE
+)
+
+# Correction to reset back to excel origin
+DaysDiff <- as.numeric(as.duration(interval(ymd("1899-12-30"), ymd("1970-01-01"))),"days")
+
+Snapshot <- read_xlsx(
+  temp_file,
+  sheet = "General",
+  colNames = TRUE,
+  detectDates = FALSE
+  ) |>
+  mutate(
+        # Convert to dates
+        across(
+            starts_with("Date"),
+            ~lubridate::as_date(., origin = "1899-12-30")
+        ),
+        # Then get the numeric values directly
+        across(
+            starts_with("Date"),
+            ~as.numeric(.)+ DaysDiff,
+            .names = "{.col}Num"
+        ),
+        Sex2 = case_when( # Fix up sex entries
+          Sex == "M" ~ "Male",
+          Sex == "Male" ~ "Male",
+          Sex == "F" ~ "Female",
+          Sex == "Female" ~ "Female",
+          Sex == "N" ~ NA_character_,
+          .default = NA_character_
+        ),
+        PatientID = stringr::str_split_i(TreatmentID,"\\.",1)
+    ) |> left_join(
+    MasterPatient |> dplyr::select(
+    PatientID,
+    AlternateID2,
+    AlternateID
+),
+by = "PatientID",
+relationship = "many-to-many"
+) |> tidyr::unite(
+  "CombID",
+  c("PatientID","AffectedSide"),
+  sep = ".",
+  na.rm = FALSE,
+  remove = FALSE
+) |> group_by(
+  CombID
+) |> arrange(
+  DateInitialExaminationNum
+  ) |> mutate(
+  RecordNum = row_number()
+) |> ungroup() |> 
+    relocate(
+        c(PatientID, ends_with("Num"),RecordNum),
+        .before = TreatmentID
+    ) 
+
+
+#Import STROBEInput to conduct flowchart and record selection "Strobe_Input"
+
+STROBEInput <- read_xlsx(
+  temp_file,
+  sheet = "Strobe_Input",
+  colNames = TRUE,
+  detectDates = FALSE
+  )
+
+# Clean up
+unlink(temp_file)
+
+```
+
+## RECORD \[6\] Participants
+
+<!--# (a) Cohort study—Give the eligibility criteria, and the sources and methods of selection of participants. Describe methods of follow-up -->
+
+Participants are eligible for inclusion in the SOFARI registry if they meet the following criteria
+
+-   Presented with a pathology localised to the foot or ankle
+
+-   Offered or recommended treatment by the reviewing surgeon (operative or non-operative)
+
+-   Aged 16 or over at the time of initial consultation for the condition included in the registry
+
+-   Have not withdrawn their data from the registry (opt-out)
+
+### Record \[6.1\] Sample selection
+
+<!--# RECORD 6.1: The methods of study population selection (such as codes or algorithms used to identify subjects) should be listed in detail. If this is not possible, an explanation should be provided. -->
+
+Record selection was based on the following criteria;
+
+-   The status of the record was not set to *Archived* (the treatment record does not meet inclusion into the registry).
+
+-   The status of the record was not set to *Pending Initial Consultation* or *Pending Imaging* (not eligible for formal diagnosis).
+
+-   The record represented the first presentation for the limb within the registry. This may not represent the first presentation to the clinic.
+
+-   The record was eligible for baseline PROMs capture. That is, sufficient time was available between patient registration and definitive treatment offered by the reviewing surgeon. In some cases, trauma cases first present to the clinic after their definitive surgical treatment and baseline PROMs cannot be captured prior to surgery.
+
+-   Diagnosis text had been retrieved at the time of analysis.
+
+The *consort* package (v`{r} utils::packageVersion("consort")`) [@consort] was used to create a table of indications for exclusion for each record and plot a flowchart (see 13.1) indicating the flow from total records processed to the final inclusion sample for analysis.
+
+```{r}
+
+# EligibleAtPreop 
+# - NFFU/failed with no treatment date
+# - NFFU/failed < treatmentdate
+# - pre-registry treatment
+# - recordcreationdate >= datetreatment
+# - registrystatus = open:no proms <= datetreatment
+
+
+STROBEFlow <- STROBEInput |> dplyr::filter(
+  !is.na(TreatmentID)
+) |> left_join(
+  Snapshot |> dplyr::select(
+    TreatmentID,
+    CombID,
+    DateInitialExamination,
+    EligibleAtPreop
+  ),
+  by = "TreatmentID"
+) |> dplyr::select(
+  TreatmentID,
+  CombID,
+  TreatmentStatus,
+  TreatmentStatusNotes,
+  DateInitialExamination,
+  EligibleAtPreop,
+  DiagnosisRawPrelim,
+  DiagnosisRawFinal
+) |> group_by(
+  CombID
+) |> arrange(
+  DateInitialExamination
+  ) |> mutate(
+  RecordNum = if_else(!is.na(CombID),row_number(),NA)
+) |> ungroup() |>
+  dplyr::mutate(
+  EligibleAtPreop = if_else(is.na(EligibleAtPreop),"No",EligibleAtPreop),
+  TreatmentStatusNotes2 = case_when(
+    stringr::str_detect(str_to_lower(TreatmentStatusNotes), "acl|amput*|wrist|shoulder|knee|(non.*registry)|nfr|(pathology not)|(non.*ankle)|(not.*registry)") ~ "Non-Registry Pathology",
+    stringr::str_detect(str_to_lower(TreatmentStatusNotes), "error|(not failed)|reop*|duplicate|incorrect|mention|superfluous|left|right|side|(complication only)|(not needed)") ~ "Accessory Record",
+        stringr::str_detect(str_to_lower(TreatmentStatusNotes), "(sa.*patient)|(sa//ak)") ~ "Non-Registry Clinician",
+    stringr::str_detect(str_to_lower(TreatmentStatusNotes), "(did not)|canx|dna|cx|attend|appointment|appt|cancel|resch|(never.*(arrived|came|return*))") ~ "No Initial Consult",
+    stringr::str_detect(str_to_lower(TreatmentStatusNotes), "empty|(no.*(note|record))|information|insufficient|(cannot retrieve)|(enough.*info*)") ~ "No Patient File",
+    stringr::str_detect(str_to_lower(TreatmentStatusNotes), "pre-registry|existing|prior") ~ "Pre-Registry Treatment",
+    stringr::str_detect(str_to_lower(TreatmentStatusNotes), "intervention|elsewhere|(treated prior)|(no.*(treatment|pathology))|refer*|(no.*diagnosis)|(other.*surg*)|(surgeon.*other)|2nd|second|hesitant|(not.*viable)|(failed.*return)|public") ~ "No Treatment Offered",
+    stringr::str_detect(str_to_lower(TreatmentStatusNotes), "withdraw*|(opt*.*out)|(unable.*recruit*)") ~ "Patient Opt-Out",
+    .default = TreatmentStatusNotes
+  ),
+exclusion1 = case_when( #exclusion before induction
+    stringr::str_detect(str_to_lower(TreatmentStatus), "pending: ic") ~ "No Initial Consult",
+    stringr::str_detect(str_to_lower(TreatmentStatus),"treatment") &
+    stringr::str_detect(str_to_lower(TreatmentStatusNotes),"imaging") ~ "Pending Diagnosis",
+    stringr::str_detect(str_to_lower(TreatmentStatus),"archived") ~ stringr::str_to_title(TreatmentStatusNotes2),
+    .default = NA_character_
+    ),
+exclusion2 = case_when( #exclusion after induction
+    is.na(exclusion1) & EligibleAtPreop == "Yes" & RecordNum == 1 ~ NA_character_,
+    is.na(exclusion1) & EligibleAtPreop == "Yes" & RecordNum > 1 ~ "Subsequent Presentation",
+    is.na(exclusion1) & RecordNum == 1 & EligibleAtPreop == "No" ~ "Not eligible for Baseline"
+
+),
+exclusion3 = case_when(
+  is.na(exclusion1) & is.na(exclusion2) & is.na(DiagnosisRawFinal) & is.na(DiagnosisRawPrelim) ~ "Missing Diagnosis",
+  .default = NA_character_
+)
+)|> dplyr::rename(
+  trialno = "TreatmentID"
+)
+
+AnalysisList = STROBEFlow |> dplyr::filter(
+  is.na(exclusion1),
+  is.na(exclusion2),
+  is.na(exclusion3)
+)
+
+
+```
+
+A masterfile was created with *tidyverse* syntax of all included records for further processing.
+
+```{r}
+MasterTable1 <- Snapshot |> dplyr::select(
+  EligibleAtPreop:VR12_Mental_TotalScore_Preop,
+  Satisfaction_Preop:PCSSF_TotalScore_Preop,
+  starts_with("FAOS"),
+  Sex2,
+  -Sex
+) |> dplyr::filter( # Filter archived and pending: ic records
+  TreatmentID %in% AnalysisList$trialno
+) |> mutate(
+  PreviousPath = case_when(
+    PreviousPathology_Preop == "Both sides" ~ "Bilateral",
+    str_detect(PreviousPathology_Preop,"same side") ~ "Ipsilateral",
+    str_detect(PreviousPathology_Preop,"opposite side") ~ "Contralateral",
+    .default = NA_character_
+  ),
+  PreviousSurgery = case_when(
+    PreviousSurgery_Preop == "Both sides" ~ "Bilateral",
+    str_detect(PreviousSurgery_Preop,"same side") ~ "Ipsilateral",
+    str_detect(PreviousSurgery_Preop,"opposite side") ~ "Contralateral",
+    .default = NA_character_
+  )
+) |> dplyr::select(
+  -c(
+    PreviousPathology_Preop,
+    PreviousSurgery_Preop
+  )
+) 
+```
+
+```{epoxy}
+
+A total of {nrow(MasterTable1)} records were selected, with dates of initial examination ranging from {min(MasterTable1$DateInitialExamination, na.rm = TRUE)} to {max(MasterTable1$DateInitialExamination, na.rm = TRUE)}. 
+```
+
+### Record \[6.2\] Algorithm validation
+
+<!--# RECORD 6.2: Any validation studies of the codes or algorithms used to select the population should be referenced. If validation was conducted for this study and not published elsewhere, detailed methods and results should be provided. -->
+
+### Record \[6.3\] Data linkage
+
+<!--# RECORD 6.3: If the study involved linkage of databases, consider use of a flow diagram or other graphical display to demonstrate the data linkage process, including the number of individuals with linked data at each stage. -->
+
+No data linkage was performed for this analysis.
+
+## RECORD \[7\] Variables
+
+<!--# Clearly define all outcomes, exposures, predictors, potential confounders, and effect modifiers. Give diagnostic criteria, if applicable -->
+
+Key variables defined as part of this analysis are summarised in Table 2 below.
+
+Table 1: Summary of key variable definitions in the analysis
+
++-------------+-----------------------------------------+--------------------------------------------------------------------+---------------+
+| Category    | Variable                                | Definition - Comments                                              | Citation      |
++=============+=========================================+====================================================================+===============+
+| Outcomes    | Pain catastrophising scale - Short form | 7-question short version of the PCS                                | [@cheng2019]  |
+|             |                                         |                                                                    |               |
+|             |                                         | Total score from sum of individual items                           |               |
++-------------+-----------------------------------------+--------------------------------------------------------------------+---------------+
+|             | VR12- MCS                               | 12-question general health questionnaire.                          | [@Selim2009]  |
+|             |                                         |                                                                    |               |
+|             |                                         | Produces mental and physical sub-scores                            |               |
++-------------+-----------------------------------------+--------------------------------------------------------------------+---------------+
+|             | FAOS                                    |                                                                    |               |
++-------------+-----------------------------------------+--------------------------------------------------------------------+---------------+
+| Exposures   | Cohort (Region)                         | categorisation of pathology based on anatomical region             |               |
++-------------+-----------------------------------------+--------------------------------------------------------------------+---------------+
+| Confounders | Age                                     | age at the date of initial examination                             |               |
++-------------+-----------------------------------------+--------------------------------------------------------------------+---------------+
+|             | Sex                                     | self-reported by the patient (male, female)                        |               |
++-------------+-----------------------------------------+--------------------------------------------------------------------+---------------+
+|             | Comorbidity score                       | Self-assessed comorbidity score (SACQ) sum of 12 items rated 0 - 3 | [@Sangha2003] |
++-------------+-----------------------------------------+--------------------------------------------------------------------+---------------+
+
+The self-assessed comorbidity score had to added to the dataset by calculating from individual responses included in the registry snapshot. The scores were then added to the analysis master table.
+
+```{r}
+# Apply to your data
+SRCQScore <- MasterTable1 |> 
+  dplyr::select(
+    TreatmentID,
+    starts_with("comorb")
+  ) |> 
+  mutate(
+    across(starts_with("Comorb"), 
+           ~ case_when(
+             is.na(.) ~ NA,
+             . == "I do not have the problem" ~ 0,
+             . == "I have the problem" ~ 1,
+             . == "I am receiving treatment for it" | 
+               . == "I have the problem, I am receiving treatment for it" ~ 2,
+             . == "The problem limits my activities" | 
+               . == "I have the problem, I am receiving treatment for it, The problem limits my activities" ~ 3,
+             TRUE ~ NA_real_  # Add default case
+           )
+    )
+  ) |> 
+  mutate(
+    SRCQTotalScore = rowSums(across(where(is.numeric)))
+  )
+```
+
+```{r}
+MasterTable2 <- MasterTable1 |> left_join(
+  SRCQScore |> dplyr::select(
+    TreatmentID,
+    SRCQTotalScore
+  ),
+  by = "TreatmentID"
+) |> dplyr::select(
+  !(starts_with("Comorb"))
+)
+```
+
+*Extract individual PCS scores*
+
+```{r}
+PCSTable  <- MasterTable1 |> 
+  dplyr::select(
+    TreatmentID,
+    starts_with("PCSSF")
+  ) |> 
+  dplyr::mutate(
+    across(starts_with("PCSSF"),
+           ~as.numeric(stringr::str_extract(.,"\\d+"))
+    )
+  )
+
+
+FAOSTable <- MasterTable1 |> 
+  dplyr::select(
+    TreatmentID,
+    starts_with("FAOS")
+  ) |> 
+  dplyr::mutate(
+    across(contains("TotalScore"),
+           ~as.numeric(stringr::str_extract(.,"\\d+"))
+    )
+  )
+
+```
+
+According to [@cheng2019] the PCS-SF (and perhaps the full scale as well) would be best scored by simply adding all the items up. The present analysis may provide a platform for future examination of subscales of PCS such as *Rumination*, *Magnification* and *Helplessness* with respect to baseline pain.
+
+The PCS-SF and FAOS baseline total scores were added to the master table.
+
+```{r}
+MasterTable3 <- MasterTable2 |> dplyr::select(
+  !(starts_with("PCSSF"))
+) |> left_join(
+  PCSTable |> dplyr::select(
+    TreatmentID,
+    PCSSF_TotalScore_Preop
+  ),
+  by = "TreatmentID"
+) |> left_join(
+  FAOSTable |> dplyr::select(
+    TreatmentID,
+    FAOS_Symptom_TotalScore_Preop,
+    FAOS_Pain_TotalScore_Preop,
+    FAOS_DailyLiving_TotalScore_Preop,
+    FAOS_Sport_TotalScore_Preop,
+    FAOS_Quality_TotalScore_Preop
+    ),
+  by = "TreatmentID"
+  ) |> dplyr::select(
+  TreatmentID,
+  PatientID,
+  TreatmentType,
+  Sex2,
+  Provider,
+  AgeAtInitialExam,
+  InjuryToPresentation,
+  VR12_Physical_TotalScore_Preop,
+  VR12_Mental_TotalScore_Preop,
+  SRCQTotalScore,
+  PCSSF_TotalScore_Preop,
+  FAOS_Symptom_TotalScore_Preop,
+  FAOS_Pain_TotalScore_Preop,
+  FAOS_DailyLiving_TotalScore_Preop,
+  FAOS_Sport_TotalScore_Preop,
+  FAOS_Quality_TotalScore_Preop,
+  Satisfaction_Preop,
+  PreviousPath,
+  PreviousSurgery
+)
+
+```
+
+### Diagnosis
+
+Raw text stored in the registry snapshot was processed with custom functions (see *Functions for Processing*). Additional processing was performed to create a *Region* label, describing the anatomical region in which the pathology affected.
+
+```{r}
+#| echo: false
+
+
+TargetURL = "https://docs.google.com/spreadsheets/d/1f-zb_pdjH9PuFSdkMBcAdyPCP_b-YJk2Jzvrn5G6df4/edit"
+
+```
+
+```{r}
+
+#| eval: true
+#| echo: false
+#| message: false
+#| warning: false
+
+
+
+progressr::handlers("progress")
+
+# Run the processing
+with_progress({
+  # Try processing with smaller batch size and fewer workers
+# Update your safe_process_diagnosis call
+DiagTerm <- safe_process_diagnosis(
+  MasterTable2,
+  target_terms_url = TargetURL,
+  batch_size = 500,
+  workers = 4
+)
+})
+
+```
+
+```{r}
+# Group by sequence
+
+DiagSequence <- DiagTerm |> tidyr::unite(
+  "SequenceID1",
+  c(TreatmentID,
+    SequenceID
+    ),
+  na.rm = TRUE, 
+  remove = FALSE, 
+  sep = "."
+  ) |> group_by(
+    SequenceID1
+    ) |> summarize(
+    Term2 = str_c(Term1, collapse = " ")
+  ) |> ungroup() |> mutate(
+    TreatmentID = stringr::str_remove(SequenceID1, "\\.[^.]*$")
+  )
+
+# Group by Treatment
+
+DiagTreatment <- DiagSequence |> group_by(
+  TreatmentID
+) |> summarise(
+  Term3 = str_c(
+    Term2,
+    collapse = "; "
+  )
+) |> ungroup()
+
+
+```
+
+```{r}
+
+#| eval: true
+#| echo: false
+#| message: false
+#| warning: false
+
+  
+# With parallel processing
+DiagFunc1 <- categorize_diagnosis(
+  DiagSequence |> filter(
+    stringr::str_detect(Term2,"history", negate = TRUE)
+  ),
+  remove_intermediate = FALSE,
+  use_parallel = TRUE,
+  chunk_size = 4000) |>
+  mutate(
+    SequenceRow = row_number(),
+    has_region = rowSums(across(Ankle:Foot)),
+    has_pathology = rowSums(across(Arthritis:Instability)),
+   # RowTarget = SequenceRow - 1,
+    .by = TreatmentID
+  ) |> tidyr::unite(
+    "SequenceIDUpdate",
+    c(TreatmentID,SequenceRow),
+    sep = ".",
+    na.rm = FALSE,
+    remove = FALSE
+  ) 
+
+```
+
+```{r}
+DiagFunc2 <- DiagFunc1 |> 
+  mutate(
+    RowCount1 = n(),
+    .by = TreatmentID
+  ) |> 
+  dplyr::select(
+    -(Ankle:NegatePathology)
+  ) |> 
+  mutate(
+    SequenceCat1 = if_else(
+      has_region >= 1 & has_pathology >= 1,
+      "Classified",
+      "No"
+    )
+  ) |> 
+  group_by(TreatmentID) |> 
+  arrange(desc(SequenceRow), .by_group = TRUE) |> 
+  mutate(
+    Product = has_region * has_pathology,
+    SequenceCatLead = lead(SequenceCat1),
+    ResetFlag = case_when( 
+      lag(Product) >= 1 & Product == 0 ~ 1,
+      lag(Product) < 1 & Product < 1 ~ 1,
+      Product >= 1 & lag(Product) < 1 ~ 1,
+      SequenceRow == max(SequenceRow) & Product == 0 ~ 1,
+      SequenceRow == max(SequenceRow) & Product >= 1 ~ 0,
+      .default = 0
+    )
+  ) |> 
+  ungroup()
+
+```
+
+```{r}
+DiagFunc2a <- DiagFunc2 |> filter(
+  Product > 0,
+  ResetFlag == 0
+)
+
+
+DiagFunc2b <- left_join(
+  DiagFunc2 |> filter(
+    ResetFlag == 1
+  ) |> distinct(
+    TreatmentID,
+    .keep_all = TRUE
+  ),
+DiagFunc2c <- DiagFunc2 |> filter(
+  ResetFlag == 1
+) |> group_by(
+  TreatmentID
+) |> summarise( # COLLAPSE rows into 1. JOIN back into FuncX (bindrows)
+   Term3 = str_c(
+     Term2,
+     collapse = "; "
+   )
+ ),
+by = "TreatmentID"
+) |> ungroup() |> dplyr::select(
+  -Term2
+) |> rename(
+  Term2 = "Term3"
+)
+
+
+DiagFunc3 <- bind_rows(
+  DiagFunc2a,
+  DiagFunc2b
+) |> arrange(
+  TreatmentID
+) |> dplyr::select(
+  -(has_region:ResetFlag)
+)
+
+```
+
+```{r}
+
+#| eval: true
+#| echo: false
+#| message: false
+#| warning: false
+
+  
+# With parallel processing
+DiagFunc4 <- categorize_diagnosis(
+  DiagFunc3 |> filter(
+    stringr::str_detect(Term2,"history", negate = TRUE)
+  ),
+  remove_intermediate = FALSE,
+  use_parallel = TRUE,
+  chunk_size = 4000) |>
+  mutate(
+    SequenceRow = row_number(),
+    has_region = rowSums(across(Ankle:Foot)),
+    has_pathology = rowSums(across(Arthritis:Instability)),
+   # RowTarget = SequenceRow - 1,
+    .by = TreatmentID
+  )  |> filter(
+  has_region*has_pathology >= 1
+) |> tidyr::unite(
+    "SequenceIDUpdate",
+    c(TreatmentID,SequenceRow),
+    sep = ".",
+    na.rm = FALSE,
+    remove = FALSE
+  )
+
+```
+
+```{r}
+DiagRegion <- DiagFunc4 |> dplyr::select(
+  Term2,
+  SequenceIDUpdate,
+  TreatmentID:Foot
+) |> dplyr:: select(
+  -SequenceRow
+) |> tidyr::pivot_longer(
+  cols = !c(TreatmentID,SequenceIDUpdate,Term2),
+  names_to = "Region",
+  values_to = "RegionPresence"
+) |> dplyr::filter(
+  RegionPresence > 0,
+  !is.na(Region)
+) |> dplyr::mutate(
+  RegionCount = n_distinct(Region),
+  RegionCat = if_else(RegionCount > 1,"Multiple","Isolated"),
+  .by = TreatmentID
+) |> dplyr::select(
+  -RegionPresence
+)
+```
+
+```{r}
+DiagPathology <- DiagFunc4 |> dplyr::select(
+  Term2,
+  TreatmentID,
+  SequenceIDUpdate,
+  Arthritis:Other
+) |> tidyr::pivot_longer(
+  cols = !c(TreatmentID,SequenceIDUpdate,Term2),
+  names_to = "Pathology",
+  values_to = "PathPresence"
+) |> filter(
+  PathPresence > 0,
+  !is.na(Pathology)
+) |> mutate(
+  PathCount = n_distinct(Pathology),
+  PathCat = if_else(PathCount > 1,"Multiple","Isolated"),
+  .by = TreatmentID
+)
+
+
+```
+
+```{r}
+
+DiagRegion1 <- DiagRegion |> distinct(
+  TreatmentID,
+  .keep_all = TRUE
+) 
+
+
+DiagPath1 <- DiagPathology |> distinct(
+  TreatmentID,
+  .keep_all = TRUE
+) 
+```
+
+### Cohort
+
+A cohort label (combining pathology and region) was created from the processed diagnosis text.
+
+```{r}
+# Slice Down Snapshot based on diagnosis availability
+
+MasterTable4 <- MasterTable3 |> left_join(
+  DiagFunc4 |> dplyr::select(
+    TreatmentID,
+    Term2
+  )  |>
+  summarize(
+    Term3 = str_c(Term2, collapse = " "),
+    .by = TreatmentID
+  ),
+  by = "TreatmentID"
+)  |> left_join(
+  DiagRegion1 |> dplyr::select(
+    TreatmentID,
+    RegionCat
+  ),
+  by = "TreatmentID"
+) |> left_join(
+  DiagPath1 |> dplyr::select(
+    TreatmentID,
+    PathCat
+  ),
+  by = "TreatmentID"
+) |> tidyr::unite(
+  "Cohort",
+  c(RegionCat,PathCat),
+  sep = "_",
+  na.rm = FALSE,
+  remove = FALSE
+) |> left_join(
+  DiagRegion1 |> filter(
+    RegionCat == "Isolated"
+    ) |> dplyr::select(
+    TreatmentID,
+    Region
+  ),
+  by = "TreatmentID"
+) |> left_join(
+  DiagPath1 |> filter(
+    PathCat == "Isolated"
+    ) |> dplyr::select(
+    TreatmentID,
+    Pathology
+  ),
+  by = "TreatmentID"
+) |> mutate(
+  Cohort1 = case_when(
+    is.na(RegionCat) & is.na(PathCat) ~ NA_character_,
+    RegionCat == "Multiple" & PathCat == "Multiple" ~ "Multiple",
+    !is.na(Region) & is.na(Pathology) ~ Region,
+    is.na(Region) & !is.na(Pathology) ~ Pathology,
+    !is.na(Region) & !is.na(Pathology) ~ stringr::str_c(Region,Pathology, sep = "_")
+  )
+) |> mutate(
+  Cohort2 = ifelse(n() < 30, "General", Cohort1),
+  .by = Cohort1,
+  Region2 = if_else(
+    is.na(Region) & RegionCat == "Multiple", "Multiple", Region
+  )
+) |> dplyr::select(
+  !c(
+    Region,
+    RegionCat
+  )
+) |> dplyr::rename(
+  Region = "Region2"
+) 
+
+
+
+```
+
+Establishing the breakdown of the sample by cohorts revealed that multiple pathologies across multiple regions of the foot-ankle was the most common presentation, followed by ankle_injury and multiple pathologies affecting the ankle (Figure 1).
+
+```{r}
+
+min_count <- 10
+
+# Basic counts
+  basic_counts1 <- MasterTable4 |>
+    count(Cohort2, sort = TRUE) %>%
+    mutate(
+      percentage = n / sum(n) * 100,
+      cumulative_percentage = cumsum(percentage)
+    )
+
+
+ # Create visualization
+  plot_data <- basic_counts1 |>
+    filter(
+      n >= min_count,
+      !is.na(Cohort2)
+      )  # Filter for readability
+  
+  cohort_plot <- ggplot(plot_data, aes(x = reorder(Cohort2, -n), y = n)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+              vjust = -0.5, size = 3) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Distribution of Clinical Cohorts",
+         x = "Cohort",
+         y = "Count")
+  
+  knitr::knit_print(cohort_plot)
+```
+
+Figure 1: Breakdown of sample by defined cohorts - combined pathology and region labels.
+
+### Bilateral Status
+
+The bilateral status of each record in the registry snapshot was calculated by grouping by PatientID, establishing those records with \>1 record in the table, then calculating whether the bilateral record was;
+
+-   Simultaneous - where both records are presented and created at the same time
+
+-   Index - the first limb to present for that patient within the registry
+
+-   Subsequent - the second (contralateral) limb to present for that patient within the registry that is separated from the first record by time.
+
+-   Unilateral - the record appears in the dataset with no record present for the contralateral limb
+
+```{r}
+
+SnapshotBilat1 <- MasterTable4 |> group_by(
+  PatientID
+) |> summarise(
+  TreatmentCount = n()
+) |> filter(
+  TreatmentCount > 1
+)
+
+SnapshotBilat2 <- Snapshot |> filter(
+  PatientID %in% SnapshotBilat1$PatientID
+)
+
+SnapshotLeft1 <- SnapshotBilat2 |> filter(
+  AffectedSide == "Left"
+) |> group_by(
+  PatientID
+) |> arrange(
+  DateInitialExamination,
+  .by_group = TRUE
+) |> dplyr::select(
+  TreatmentID,
+  CombID,
+  PatientID,
+  AffectedSide,
+  DateInitialExamination,
+  DateInitialExaminationNum,
+  TreatmentStatus,
+  TreatmentStatusNotes,
+  DateStatusChange
+) |> slice_head(
+  n = 1
+) |> ungroup()
+
+SnapshotRight <- SnapshotBilat2 |> filter(
+  AffectedSide == "Right"
+) |> rename(
+  DIERight = "DateInitialExamination"
+) |> group_by(
+  PatientID
+) |> arrange(
+  DIERight,
+  .by_group = TRUE
+) |> dplyr::select(
+  TreatmentID,
+  CombID,
+  PatientID,
+  AffectedSide,
+  DIERight,
+  TreatmentStatus,
+  TreatmentStatusNotes,
+  DateStatusChange
+) |> slice_head(
+  n = 1
+) |> ungroup() |> left_join(
+  SnapshotLeft1 |> dplyr::select(
+    PatientID,
+    DateInitialExamination
+  ),
+  by = "PatientID"
+  ) |> rename(
+  DIELeft = "DateInitialExamination"
+) |> mutate(
+   DIEDiff = as.numeric(as.duration(DIERight %--% DIELeft),"weeks")
+  ) |> mutate(
+    BilateralPres = case_when(
+      DIEDiff == 0 ~ "Simultaneous",
+      DIEDiff > 0 ~ "Index",
+      DIEDiff < 0 ~ "Subsequent",
+      .default = "Unilateral"
+    )
+  )
+
+SnapshotLeft2 <- SnapshotLeft1 |> rename(
+  DIELeft = "DateInitialExamination"
+) |> left_join(
+  SnapshotRight |> dplyr::select(
+    PatientID,
+    DIERight
+  ),
+  by = "PatientID"
+  ) |> mutate(
+   DIEDiff = as.numeric(as.duration(DIELeft %--% DIERight),"weeks")
+  ) |> mutate(
+    BilateralPres = case_when(
+      DIEDiff == 0 ~ "Simultaneous",
+      DIEDiff > 0 ~ "Index",
+      DIEDiff < 0 ~ "Subsequent",
+      .default = "Unilateral"
+    )
+  ) |> filter(
+    BilateralPres != "Unilateral"
+  )
+```
+
+Marry back into the master table.
+
+```{r}
+MasterTable5 <- left_join(
+  MasterTable4,
+  SnapshotLeft2 |> dplyr::select(
+    TreatmentID,
+    BilateralPres
+  ) |> rename(
+    BilateralPresLeft = "BilateralPres"),
+  by = "TreatmentID"
+) |> left_join(
+  SnapshotRight |> dplyr::select(
+    TreatmentID,
+    BilateralPres
+  ) |> rename(
+    BilateralPresRight = "BilateralPres"),
+  by = "TreatmentID"
+) |> tidyr::unite(
+  "BilateralPres",
+  c(BilateralPresLeft,BilateralPresRight),
+  na.rm = TRUE,
+  remove = TRUE
+) |> mutate(
+  BilateralPres1 = if_else(
+    str_count(BilateralPres) < 1,
+    "Unilateral",
+    BilateralPres
+  )
+) |> dplyr::select(
+  -BilateralPres
+) |> rename(
+  BilateralPres = "BilateralPres1"
+) |> mutate(
+  BilateralDiag = stringr::str_detect(
+    Term3,
+    "bilateral"
+  )
+  )
+
+
+```
+
+### RECORD \[7.1\] Codes and Algorithms
+
+<!--# RECORD 7.1: A complete list of codes and algorithms used to classify exposures, outcomes, confounders, and effect modifiers should be provided. If these cannot be reported, an explanation should be provided -->
+
+## RECORD \[9\] Bias
+
+<!--# Describe any efforts to address potential sources of bias -->
+
+For a discussion of biases in the context of the clinical registry utilised for this analysis, refer to [@scholes2023]. Specific to this analysis, the following considerations are noted below.
+
+Table 1: Biases in an analysis of an observational cohort retrieved from a clinical registry
+
++-------------------+--------------------------------------------------------------------------------------------------------------+---------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Bias              | Definition                                                                                                   | Source                    | Mitigation                                                                                                                                                                                    |
++===================+==============================================================================================================+===========================+===============================================================================================================================================================================================+
+| Selection         |                                                                                                              |                           |                                                                                                                                                                                               |
++-------------------+--------------------------------------------------------------------------------------------------------------+---------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Misclassification | Treatment record labelled into incorrect cohort. PROMs package not aligned to                                | [@Benchimol2015]          | Clinical text retrieved by two experienced reviewers and transferred to registry.                                                                                                             |
+|                   |                                                                                                              |                           |                                                                                                                                                                                               |
+|                   |                                                                                                              |                           | Code functions used to process text in a repeatable workflow.                                                                                                                                 |
++-------------------+--------------------------------------------------------------------------------------------------------------+---------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Immortal Time     | Individuals meet eligibility criteria that can only assessed after followup has started                      | [@nguyen2021]             | Patients are enrolled at first presentation to the registry for their condition - but this does not necessarily represent first presentation to the clinic.                                   |
++-------------------+--------------------------------------------------------------------------------------------------------------+---------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Missing Data      | The absence of a data value where a treatment record is eligible to have a data value collected              | [@carroll2020]            | Multiple imputation was used to impute missing values and model-based predictions of outcomes used                                                                                            |
++-------------------+--------------------------------------------------------------------------------------------------------------+---------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Prevalent User    | Follow-up starts after eligible individuals have started the treatment. The follow-up time is left-truncated | [@nguyen2021]             | Eligibility and enrollment is performed prior to treatment offering for any patient or new presentation. Records where definitive treatment occurred before registry enrolment were excluded. |
++-------------------+--------------------------------------------------------------------------------------------------------------+---------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Pseudoreplication | Analyse data while ignoring dependency between observations. Inadequate model specification.                 | [@davies2015; @lazic2010] | Because not all patients had multiple treatments, mixed effects models were poorly specified. A generalised linear model was utilised instead.                                                |
++-------------------+--------------------------------------------------------------------------------------------------------------+---------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Confounder        | An variable of interest and a target outcome simultaneously influenced by a third variable                   | [@tennant2020]            | PCS-SF models incorporated adjustment for confounders                                                                                                                                         |
++-------------------+--------------------------------------------------------------------------------------------------------------+---------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+## RECORD \[10\] Study size
+
+<!--# Explain how the study size was arrived at -->
+
+Sample size was derived based on the available records from the Registry at the time of analysis.
+
+<!--# Insert power analysis for PCS model -->
+
+## RECORD \[11\] Quantitative variables
+
+<!--# Explain how quantitative variables were handled in the analyses. If applicable, describe which groupings were chosen and why -->
+
+Cheng et al (2019) reported a cutoff of 7 to related to clinically significant depressive symptoms. The PCSSF Total score was categorised into 7=\< and \<7.
+
+To validate the PCS-SF, a threshold for the mental component of the VR12 (VR12-MCS) was retrieved from the literature. A previous paper identified a score of 40 or below to be correlated with poor outcomes after hip arthroplasty [@grits2023].
+
+## RECORD \[12\] Statistical methods
+
+<!--# (a) Describe all statistical methods, including those used to control for confounding (b) Describe any methods used to examine subgroups and interactions (c) Explain how missing data were addressed (d) Cohort study—If applicable, explain how loss to follow-up was addressed Case-control study—If applicable, explain how matching of cases and controls was addressed Cross-sectional study—If applicable, describe analytical methods taking account of sampling strategy (e) Describe any sensitivity analyses -->
+
+A number of analytical techniques were employed to i) clean the data inputs as well as ii) evaluate missingness in the dataset and iii) complete the descriptive analysis of;
+
+-   Patient characteristics
+
+-   Pathology details
+
+-   Patient-reported outcomes
+
+The PCS-SF was imputed and then a model generated to assess PCS-SF total score
+
+### RECORD \[12.1\] Data access
+
+<!--# RECORD 12.1: Authors should describe the extent to which the investigators had access to the database population used to create the study population. -->
+
+The registry system represents all cases presenting to the rooms of collaborating specialists within Sydney, Australia from the inception of the clinical registry to the analysis date. All reviewed charts from the operating surgeons practice records (electronic medical record) were entered into database and the present analysis draws data from a regular compilation of the registry records (snapshot) produced quarterly by the registry administration team.
+
+### RECORD \[12.2\] Data Cleaning
+
+<!--# RECORD 12.2: Authors should provide information on the data cleaning methods used in the study. -->
+
+Text data was cleaned using custom functions as described in *Functions for processing*.
+
+#### Missingness
+
+In the record selection workflow, patients with text in the diagnosis text field were included in the final analysis number. However, there was a proportion of patients that had text that could not be categorised into an anatomical region. For the purposes of this draft analysis, these cases will be removed and a round of chart review will be performed to resolve the discrepancy between the text and the classification code.
+
+```{r}
+MasterAnalysis <- MasterTable5 |> dplyr::select(
+  TreatmentID:Satisfaction_Preop,
+  Region,
+  BilateralPres
+) |> dplyr::filter(
+  !is.na(Region)
+) 
+```
+
+Missingness was visualised with the *naniar* package (v`{r} utils::packageVersion("naniar")`) [@naniar]. It showed that patients with a diagnosis also had other missing data, predominantly PROMs data.
+
+```{r}
+
+vis_miss(MasterAnalysis)
+
+```
+
+Figure 2: Summary of missingness in analysis dataset.
+
+The *mice* (v`{r} utils::packageVersion("mice")`) [@mice] was used to impute the dataset. A predictor matrix was created to remove record identifiers and passive variables (e.g. PCS categorisation) from the imputation. Imputation was performed over 20 replications and stored in a variable for further processing.
+
+```{r}
+# First create your predictor matrix as before
+predM <- mice::make.predictorMatrix(MasterAnalysis)
+
+# Switch off IDs from predicting
+predM[,"TreatmentID"] <- 0 
+predM["TreatmentID",] <- 0
+predM[,"PatientID"] <- 0 
+predM["PatientID",] <- 0
+
+# Create a method vector
+meth <- mice::make.method(MasterAnalysis)
+
+# Modified mice command including method specification
+MasterImp <- mice::mice(
+  MasterAnalysis,
+  maxit = 10,
+  seed = 4218,
+  m = 20,
+  printFlag = FALSE,
+  predictorMatrix = predM,
+  method = meth
+  )
+```
+
+A strip plot (Figure 3) were used to visually inspect the convergence of the imputation iterations against the original dataset.
+
+```{r Density Plot, eval = FALSE}
+
+mice::densityplot(MasterImp)
+
+
+```
+
+```{r Strip Plot}
+plot(MasterImp)
+
+```
+
+Figure 3: Strip plot of imputed data over 5 iterations with 20 imputations per iteration.
+
+The estimated PCS-SF total score from the imputation model versus the distribution of the observed PCS-SF was plotted as a visual inspection of the imputation result (Figure 4).
+
+```{r}
+ggplot() +
+  geom_density(data = complete(MasterImp, 1), aes(x = PCSSF_TotalScore_Preop, color = "Observed")) +
+  geom_density(data = complete(MasterImp, 2:10), aes(x = PCSSF_TotalScore_Preop, color = "Imputed")) +
+  labs(title = "PCS-SF: Observed vs. Imputed Distributions")
+```
+
+Figure 4. Estimated versus observed PCS-SF for the analysis cohort.
+
+### RECORD \[12.3\] Linkage
+
+<!--# RECORD 12.3: State whether the study included person-level, institutional-level, or other data linkage across two or more databases. The methods of linkage and methods of linkage quality evaluation should be provided. -->
+
+No data linkage was performed for this analysis.
+
+### Analysis Methods
+
+Participant flow - consort package and flow chart Descriptive - gtsummary and prepared for display with knitr Outcome data - ggplot2 complete case analysis
+
+A flow chart was created with the *consort* package (v`{r} utils::packageVersion("consort")`) [@consort] to describe the inclusion and exclusion of records into the sample pool for the present analysis to be drawn from. Patient demographics and pathology characteristics were summarised using *gtsummary* (v`{r} utils::packageVersion("gtsummary")`) [@gtsummary]. Graphs were generated using *ggplot2* (v`{r} utils::packageVersion("ggplot2")`) [@ggplot2]. Graphs and tables were prepared for display using *knitr* (v`{r} utils::packageVersion("knitr")`) [@knitr]. A linear model was fitted to the imputed data using *stats* (v`{r} utils::packageVersion("stats")`) [@stats] with the following form.
+
+```{r, echo = TRUE}
+
+PCSMod <- with(
+  MasterImp, 
+  exp = lm(
+    PCSSF_TotalScore_Preop ~ Region + AgeAtInitialExam + Sex2 + BilateralPres + SRCQTotalScore + VR12_Physical_TotalScore_Preop + VR12_Mental_TotalScore_Preop
+    )
+)
+    
+```
+
+The model was summarised using *gtsummary*. Predicted values for all model variables were generated from the model object using *marginaleffects* (v`{r} utils::packageVersion("marginaleffects")`) [@marginaleffects].
+
+A supplementary analysis was performed on VR12-MCS categorised as described in Methods - RECORD \[11\] Quantitative Variables. A receiver operating characteristic curve was generated using the *pROC* package (v`{r} utils::packageVersion("pROC")`) [@pROC]. The ROC curve was annotated with the most appropriate PCS-SF threshold and the area under the curve.
+
+Alpha was set for all significance tests at 5%, with confidence intervals of 95% used to bound point estimates for central tendency, model coefficients and area under the curve (ROC analysis).
+
+# Results
+
+## RECORD \[13\] Participants
+
+<!--# Report numbers of individuals at each stage of study—eg numbers potentially eligible, examined for eligibility, confirmed eligible, included in the study, completing follow-up, and analysed. Give reasons for non-participation at each stageConsider use of a flow diagram -->
+
+```{epoxy}
+
+The initial export from the registry returned {nrow(STROBEInput)} records of all types. 
+
+```
+
+### RECORD \[13.1\] Participant Flow
+
+<!--# RECORD 13.1: Describe in detail the selection of the persons included in the study (i.e., study population selection) including filtering based on data quality, data availability and linkage. The selection of included persons can be described in the text and/or by means of the study flow diagram. -->
+
+The diagram below (Figure 5) summarises recruitment and categorisation of patients from the SOFARI registry into the final analysis cohort.
+
+```{r}
+STROBEplot <- consort_plot(
+  data = STROBEFlow,
+  orders = c(
+    trialno = "Population",
+    exclusion1 = "Screened Out",
+    trialno = "Active Records",
+    exclusion2 = "Excluded",
+    trialno = "Total Pool",
+    exclusion3 = "Not Available",
+    trialno = "Available Pool"
+  ),
+  side_box = c(
+    "exclusion1",
+    "exclusion2",
+    "exclusion3"
+  ),
+  cex = 0.8
+)
+
+knitr::knit_print(STROBEplot)
+
+```
+
+Figure 5: Flow chart of treatment record inclusion for analysis.
+
+## RECORD \[14\] Patient Characteristics
+
+<!--# (a) Give characteristics of study participants (eg demographic, clinical, social) and information on exposures and potential confounders(b) Indicate number of participants with missing data for each variable of interest (c) Cohort study—Summarise follow-up time (eg, average and total amount) -->
+
+Summarising the sample by anatomical region showed the ankle to be most common presentation, followed by multiple regions (Figure 6).
+
+```{r}
+
+min_count <- 10
+
+# Basic counts
+  basic_counts2 <- MasterAnalysis |> 
+    count(Region, sort = TRUE) %>%
+    mutate(
+      percentage = n / sum(n) * 100,
+      cumulative_percentage = cumsum(percentage)
+    )
+
+
+ # Create visualization
+  plot_data <- basic_counts2 |>
+    filter(
+      n >= min_count,
+      !is.na(Region)
+      )  # Filter for readability
+  
+  cohort_plot <- ggplot(plot_data, aes(x = reorder(Region, -n), y = n)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+              vjust = -0.5, size = 3) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Distribution of Diagnostic Groups",
+         x = "Region",
+         y = "Count")
+  
+  knitr::knit_print(cohort_plot)
+```
+
+Figure 6: Breakdown of sample by diagnostic group - region labels.
+
+Patient characteristics for the sample are summarised in Table 2.
+
+Table 2: Summary of patient and treatment record characteristics for the analysed sample.
+
+```{r}
+
+Table4 <- gtsummary::tbl_summary(
+  MasterAnalysis |> dplyr::select(
+    !(c(
+      TreatmentID,
+      PatientID,
+      PCSSF_TotalScore_Preop
+    ))
+  ),
+label = list(
+    AgeAtInitialExam ~ "Age",
+    InjuryToPresentation ~ "Onset to Presentation (Days)",
+    #BMI ~ "Body Mass Index",
+    BilateralPres ~ "Bilateral",
+    Region ~ "Diagnostic Group",
+    Sex2 ~ "Female",
+    Satisfaction_Preop ~ "Symptom Satisfaction"
+    ),
+    type = list(
+    Sex2 ~ "dichotomous"
+    ),
+    value = list(
+      Sex2 ~ "Female"
+    ),
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{p}% ({n})"
+      ),
+    missing = "no"
+) |> gtsummary::add_n() |> gtsummary::add_ci(statistic = list(all_categorical() ~ "{conf.low} - {conf.high}",
+                          all_continuous() ~ "{conf.low} - {conf.high}")) |> gtsummary::add_stat_label(
+    location = "row"
+  ) 
+    # |> modify_table_styling(
+    #   columns = label,
+    #   rows = label == "DVA",
+    #   footnote = "DVA = Department of Veterans Affairs"
+    # ) %>% modify_table_styling(
+    #   columns = label,
+    #   rows = label == "TAC",
+    #   footnote = "TAC = Transport Accident Commission"
+    # )
+
+knitr::knit_print(Table4)
+
+
+```
+
+## RECORD \[15\] Outcome data
+
+<!--# Cohort study—Report numbers of outcome events or summary measures over timeCase-control study—Report numbers in each exposure category, or summary measures of exposure Cross-sectional study—Report numbers of outcome events or summary measures -->
+
+Complete case analysis displayed unique distributions of PCS-SF total score between diagnostic groups (Figure 7).
+
+```{r}
+PCSprPlot1 <- ggplot(data = MasterAnalysis, mapping = aes(y = Region, x = PCSSF_TotalScore_Preop)) + stat_slabinterval(aes(thickness = after_stat(pdf*n)), scale = 0.7) +
+  stat_dotsinterval(side = "bottom", scale = 0.7, slab_linewidth = NA) +
+  scale_fill_brewer(palette = "Set2")
+
+knitr::knit_print(PCSprPlot1)
+```
+
+Figure 7: PCS-SF Total Score by Diagnostic Group
+
+## RECORD \[16\] Main results
+
+<!--# (a) Give unadjusted estimates and, if applicable, confounder-adjusted estimates and their precision (eg, 95% confidence interval). Make clear which confounders were adjusted for and why they were included. (b) Report category boundaries when continuous variables were categorized. (c) If relevant, consider translating estimates of relative risk into absolute risk for a meaningful time period -->
+
+Table 4: Summary of regression assessing the effect of region on PCS-SF adjusted for confounders.
+
+```{r}
+PCSfit <- gtsummary::tbl_regression(
+  PCSMod,
+  tidy_fun = pool_and_tidy_mice,
+               label = list(
+                            Region ~ "Diagnostic Group"
+               ),
+  estimate_fun = function(x) style_number(x, digits = 2), 
+  pvalue_fun = function(x) style_pvalue(x, digits = 3)
+)  
+
+knitr::knit_print(PCSfit)
+```
+
+```{epoxy}
+
+Analysis of pain catastrophizing scores revealed significant differences across anatomical regions (Table 5), after adjustment for demographic characteristics and patient-reported health measures. Compared to ankle conditions (reference group), patients with forefoot (β = {gtsummary::inline_text(PCSfit, variable = "Region", level = "Forefoot")}) and rearfoot (β = {gtsummary::inline_text(PCSfit, variable = "Region", level = "Rearfoot")}) and multiple region involvement (β = {gtsummary::inline_text(PCSfit, variable = "Region", level = "Multiple")}) demonstrated higher pain catastrophizing scores at baseline. The model adjusted for age, sex, bilateral presentation status, comorbidity burden, and physical and mental health component scores. This suggests that anatomical location of the condition may be independently associated with baseline pain catastrophizing, with rearfoot conditions showing the strongest association.
+
+```
+
+Predictions were generated from the model and summarised.
+
+```{r}
+
+# Calculate marginal means
+PCSPredict <- marginaleffects::predictions(
+  PCSMod,
+  type = "response"
+  ) |> dplyr::mutate(
+  PCSCat = if_else(
+    PCSSF_TotalScore_Preop >= 7, "Yes","No"
+  )
+)
+
+```
+
+```{r}
+PCSprPlot2 <- ggplot(data = PCSPredict, mapping = aes(y = Region, x = PCSSF_TotalScore_Preop)) + stat_slabinterval(aes(thickness = after_stat(pdf*n)), scale = 0.7) +
+  stat_dotsinterval(side = "bottom", scale = 0.7, slab_linewidth = NA) +
+  scale_fill_brewer(palette = "Set2") +
+  ggtitle('PCS Predicted by Region')
+
+knitr::knit_print(PCSprPlot2)
+```
+
+Figure 8: Model predicted PCS-SF compared between diagnostic groups - region labels
+
+Pairwise comparisons revealed small effect sizes in differences between Regions (Table 5).
+
+Table 5: Pairwise comparisons between regions for model-predicted averages of PCS-SF.
+
+```{r}
+
+
+PCSComp <- avg_comparisons(
+  PCSMod,
+  newdata = "marginalmeans",
+  variables = list(Region = "pairwise"),
+  conf_level = 0.95
+) |> dplyr::select(
+    contrast,
+    estimate,
+    std.error,
+    p.value
+    ) |> gt() |> fmt_number(
+    decimals = 3
+  )
+
+
+knitr::knit_print(PCSComp)
+
+```
+
+Table 6: Comparisons of model-predicted PCS categorised based on Cheng et al threshold (x = 7), compared between Regions.
+
+```{r}
+
+PCSCatTable <- tbl_summary(
+  PCSPredict |> dplyr::select(
+    Region,
+    PCSCat
+  ),
+  by = Region,
+  label = list(
+    PCSSF_TotalScore_Preop = "PCS Total",
+    PCSCat = "PCS >= 7"),
+) |> add_overall() |> add_p()
+
+knitr::knit_print(PCSCatTable)
+
+```
+
+## RECORD \[17\] Other analyses
+
+<!--# Report other analyses done—eg analyses of subgroups and interactions, and sensitivity analyses -->
+
+<!--# Maybe rerun PCSCat with PCSCat included in mice as passive imputation -->
+
+*PCS against VRMCSCat*
+
+The model-predicted PCS-SF was assessed against the VR12-MCS cutoff (x = 40).
+
+```{r}
+
+PCSPredict2 <- PCSPredict |> mutate(
+  VR12Cat = if_else(
+    VR12_Mental_TotalScore_Preop <= 40, "Yes", "No"
+  )
+)
+
+```
+
+```{r}
+roc.VR12 <- pROC::roc(
+  PCSPredict2$VR12Cat, 
+  PCSPredict2$PCSSF_TotalScore_Preop,
+  percent=TRUE,
+  # arguments for ci
+  ci=TRUE, boot.n=100, ci.alpha=0.9, stratified=FALSE
+  )
+
+plot(
+  roc.VR12,
+  print.auc=TRUE,
+  show.thres=TRUE,
+  print.thres = TRUE
+  )
+
+sens.ci <- pROC::ci.se(roc.VR12, specificities=seq(0, 100, 5))
+plot(sens.ci, type="shape", col="lightblue")
+
+```
+
+Figure 9: Receiver operating characteristic curve for PCS-SF score against the VR12-MCS threshold for poor surgical outcomes (x = 40).
+
+Table 7: Summary of PCS-SF exceeding ROC threshold (10.5) by diagnostic group
+
+```{r}
+
+PCSPredict3 <- PCSPredict2 |> dplyr::mutate(
+  PCSCat2 = if_else(
+    PCSSF_TotalScore_Preop >= 10.5, "Yes","No"
+)
+)
+
+PCSCatTable2 <- tbl_summary(
+  PCSPredict3 |> dplyr::select(
+    Region,
+    PCSCat2
+  ),
+  by = Region,
+  label = list(
+    PCSCat = "PCS >= 10.5"),
+) |> add_overall() |> add_p()
+
+knitr::knit_print(PCSCatTable2)
+
+```
+
+# Discussion
+
+## RECORD \[18\] Key results
+
+<!--# Summarise key results with reference to study objectives -->
+
+The average pain catastrophizing score was low in foot and ankle pathology presenting for surgical review. The average did not differ by a meaningful amount (low effect size) between anatomical regions of presentation.
+
+The incidence of clinically significant catastrophising was \~50% (high?) and did not differ between anatomical regions by a meaningful amount (low effect size).
+
+A threshold of 10.5 points on the PCS-SF was 78.6% sensitive and 62.7% specific for VR12-MCS being at or below the threshold (X = 40).
+
+## RECORD \[19\] Limitations
+
+<!--# Discuss limitations of the study, taking into account sources of potential bias or imprecision. Discuss both direction and magnitude of any potential bias -->
+
+-   First presentation to registry did not guarantee first presentation to clinic
+-   Region on its own may not be sufficient to represent differences between clinical sub-groups presenting for surgical review in this population
+-   The thresholds for PCS-SF and VR12-MCS were not derived from foot and ankle populations.
+
+### RECORD \[19.1\] Implications of non-specific data
+
+<!--# RECORD 19.1: Discuss the implications of using data that were not created or collected to answer the specific research question(s). Include discussion of misclassification bias, unmeasured confounding, missing data, and changing eligibility over time, as they pertain to the study being reported. -->
+
+-   Potential for misclassification bias between ankle and rearfoot. Clinic notes can be unspecific with respect to the structures involved or the mechanism of injury (ankle vs rearfoot inversion overlapping). Missing data was addressed using multiple imputation, but this procedure operates under significant assumptions with respect to the nature and mechanisms of missingness within the dataset. Eligibility criteria did not change over time and was conceived as part of the registry design and did not change through its operation or expansion across multiple clinics.
+
+## RECORD \[20\] Interpretation
+
+<!--# Give a cautious overall interpretation of results considering objectives, limitations, multiplicity of analyses, results from similar studies, and other relevant evidence -->
+
+Pain catastrophisation may not be associated with patterns of pathology presenting for surgical review in specialist clinics within a metropolitan and regional setting.
+
+The incidence of clinically relevant pain catastrophising may be relatively high in foot and ankle patients as a proportion of cases presenting for review.
+
+A PCS-SF total score above 9.5 may be associated with a VR12-MCS (overall mental health) score that is in turn associated with poor surgical outcomes.
+
+## RECORD \[21\] Generalisability
+
+<!--# Discuss the generalisability (external validity) of the study results -->
+
+The paper on which this analysis is modelled [@hampton2019], used an arbitrary cutoff (x = 30), with no precedent or citation, to define significant catastrophisation in their cohort of hip pathology patients. This would be considered high in the context of Cheng et al. The cutoff utilised in the present study was originally derived by [@cheng2019] using receiver-operator characteristic curves with the PCS-SF total score was regressed against a threshold of clinical depression.
+
+The threshold for clinically relevant PCS-SF may be different depending on the target classification used (clinical depression vs low VR12-MCS).
+
+# Other information
+
+## RECORD \[22\] Funding
+
+<!--# Give the source of funding and the role of the funders for the present study and, if applicable, for the original study on which the present article is based -->
+
+## RECORD \[23\] Accessibility of protocol, raw data, and programming code
+
+<!--# RECORD 22.1: Authors should provide information on how to access any supplemental information such as the study protocol, raw data, or programming code. -->
+
+Programming code is incorporated into this document.
+
+Study data may be accessed for reasonable research activities by contacting the corresponding author.
+
+# Publishing functions
+
+Write files for publication on posit connect.
+
+```{r}
+
+rsconnect::writeManifest(
+  verbose = TRUE
+)
+```
+
+# References
