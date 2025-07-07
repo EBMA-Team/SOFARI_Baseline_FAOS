@@ -1916,16 +1916,19 @@ MasterImp <- mice::mice(
   )
 ```
 
-A strip plot (Figure 3) were used to visually inspect the convergence of the imputation iterations against the original dataset.
+A strip plot (Figure 3) was used to visually inspect the convergence of the imputation iterations against the original dataset.
 
-```{r Density Plot, eval = FALSE}
+```{r}
+#| label: Density-plot
+#| eval: false
 
 mice::densityplot(MasterImp)
 
 
 ```
 
-```{r Strip Plot}
+```{r}
+#| label:strip-plot
 plot(MasterImp)
 
 ```
@@ -1936,9 +1939,9 @@ The estimated PCS-SF total score from the imputation model versus the distributi
 
 ```{r}
 ggplot() +
-  geom_density(data = complete(MasterImp, 1), aes(x = PCSSF_TotalScore_Preop, color = "Observed")) +
-  geom_density(data = complete(MasterImp, 2:10), aes(x = PCSSF_TotalScore_Preop, color = "Imputed")) +
-  labs(title = "PCS-SF: Observed vs. Imputed Distributions")
+  geom_density(data = complete(MasterImp, 1), aes(x = FAOS_Pain_TotalScore_Preop, color = "Observed")) +
+  geom_density(data = complete(MasterImp, 2:10), aes(x = FAOS_Pain_TotalScore_Preop, color = "Imputed")) +
+  labs(title = "FAOS - Pain: Observed vs. Imputed Distributions")
 ```
 
 Figure 4. Estimated versus observed PCS-SF for the analysis cohort.
@@ -1955,12 +1958,13 @@ Participant flow - consort package and flow chart Descriptive - gtsummary and pr
 
 A flow chart was created with the *consort* package (v`{r} utils::packageVersion("consort")`) [@consort] to describe the inclusion and exclusion of records into the sample pool for the present analysis to be drawn from. Patient demographics and pathology characteristics were summarised using *gtsummary* (v`{r} utils::packageVersion("gtsummary")`) [@gtsummary]. Graphs were generated using *ggplot2* (v`{r} utils::packageVersion("ggplot2")`) [@ggplot2]. Graphs and tables were prepared for display using *knitr* (v`{r} utils::packageVersion("knitr")`) [@knitr]. A linear model was fitted to the imputed data using *stats* (v`{r} utils::packageVersion("stats")`) [@stats] with the following form.
 
-```{r, echo = TRUE}
+```{r}
+#| echo: true
 
-PCSMod <- with(
+FAOSMod <- with(
   MasterImp, 
   exp = lm(
-    PCSSF_TotalScore_Preop ~ Region + AgeAtInitialExam + Sex2 + BilateralPres + SRCQTotalScore + VR12_Physical_TotalScore_Preop + VR12_Mental_TotalScore_Preop
+    FAOS_Pain_TotalScore_Preop ~ Region + AgeAtInitialExam + Sex2 + BilateralPres + SRCQTotalScore + VR12_Physical_TotalScore_Preop + PCSSF_TotalScore_Preop
     )
 )
     
@@ -2059,9 +2063,9 @@ Figure 6: Breakdown of sample by diagnostic group - region labels.
 
 Patient characteristics for the sample are summarised in Table 2.
 
-Table 2: Summary of patient and treatment record characteristics for the analysed sample.
-
 ```{r}
+#| label: tbl-characteristics
+#| tbl-cap: "Summary of patient and treatment record characteristics for the analysed sample."
 
 Table4 <- gtsummary::tbl_summary(
   MasterAnalysis |> dplyr::select(
@@ -2117,11 +2121,11 @@ knitr::knit_print(Table4)
 Complete case analysis displayed unique distributions of PCS-SF total score between diagnostic groups (Figure 7).
 
 ```{r}
-PCSprPlot1 <- ggplot(data = MasterAnalysis, mapping = aes(y = Region, x = PCSSF_TotalScore_Preop)) + stat_slabinterval(aes(thickness = after_stat(pdf*n)), scale = 0.7) +
+FAOSprPlot1 <- ggplot(data = MasterAnalysis, mapping = aes(y = Region, x = FAOS_Pain_TotalScore_Preop)) + stat_slabinterval(aes(thickness = after_stat(pdf*n)), scale = 0.7) +
   stat_dotsinterval(side = "bottom", scale = 0.7, slab_linewidth = NA) +
   scale_fill_brewer(palette = "Set2")
 
-knitr::knit_print(PCSprPlot1)
+knitr::knit_print(FAOSprPlot1)
 ```
 
 Figure 7: PCS-SF Total Score by Diagnostic Group
@@ -2133,8 +2137,8 @@ Figure 7: PCS-SF Total Score by Diagnostic Group
 Table 4: Summary of regression assessing the effect of region on PCS-SF adjusted for confounders.
 
 ```{r}
-PCSfit <- gtsummary::tbl_regression(
-  PCSMod,
+FAOSfit <- gtsummary::tbl_regression(
+  FAOSMod,
   tidy_fun = pool_and_tidy_mice,
                label = list(
                             Region ~ "Diagnostic Group"
@@ -2143,12 +2147,12 @@ PCSfit <- gtsummary::tbl_regression(
   pvalue_fun = function(x) style_pvalue(x, digits = 3)
 )  
 
-knitr::knit_print(PCSfit)
+knitr::knit_print(FAOSfit)
 ```
 
 ```{epoxy}
 
-Analysis of pain catastrophizing scores revealed significant differences across anatomical regions (Table 5), after adjustment for demographic characteristics and patient-reported health measures. Compared to ankle conditions (reference group), patients with forefoot (β = {gtsummary::inline_text(PCSfit, variable = "Region", level = "Forefoot")}) and rearfoot (β = {gtsummary::inline_text(PCSfit, variable = "Region", level = "Rearfoot")}) and multiple region involvement (β = {gtsummary::inline_text(PCSfit, variable = "Region", level = "Multiple")}) demonstrated higher pain catastrophizing scores at baseline. The model adjusted for age, sex, bilateral presentation status, comorbidity burden, and physical and mental health component scores. This suggests that anatomical location of the condition may be independently associated with baseline pain catastrophizing, with rearfoot conditions showing the strongest association.
+Analysis of FAOS pain scores revealed significant differences across anatomical regions (Table 5), after adjustment for demographic characteristics and patient-reported health measures. Compared to ankle conditions (reference group), patients with forefoot (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Forefoot")}) and foot (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Foot")}) and multiple region involvement (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Multiple")}) demonstrated lower disability from pain at baseline. The model adjusted for age, sex, bilateral presentation status, comorbidity burden, and physical and mental health component scores. This suggests that anatomical location of the condition may be independently associated with baseline pain catastrophizing, with rearfoot conditions showing the strongest association.
 
 ```
 
@@ -2157,37 +2161,34 @@ Predictions were generated from the model and summarised.
 ```{r}
 
 # Calculate marginal means
-PCSPredict <- marginaleffects::predictions(
-  PCSMod,
+FAOSPredict <- marginaleffects::predictions(
+  FAOSMod,
   type = "response"
-  ) |> dplyr::mutate(
-  PCSCat = if_else(
-    PCSSF_TotalScore_Preop >= 7, "Yes","No"
-  )
-)
+  ) 
 
 ```
 
 ```{r}
-PCSprPlot2 <- ggplot(data = PCSPredict, mapping = aes(y = Region, x = PCSSF_TotalScore_Preop)) + stat_slabinterval(aes(thickness = after_stat(pdf*n)), scale = 0.7) +
+#| label: fig-faos-predict
+#| fig-cap: "Model predicted FAOS-Pain compared between diagnostic groups - region labels"
+FAOSprPlot2 <- ggplot(data = FAOSPredict, mapping = aes(y = Region, x = FAOS_Pain_TotalScore_Preop)) + stat_slabinterval(aes(thickness = after_stat(pdf*n)), scale = 0.7) +
   stat_dotsinterval(side = "bottom", scale = 0.7, slab_linewidth = NA) +
-  scale_fill_brewer(palette = "Set2") +
-  ggtitle('PCS Predicted by Region')
+  scale_fill_brewer(palette = "Set2") 
 
-knitr::knit_print(PCSprPlot2)
+knitr::knit_print(FAOSprPlot2)
 ```
-
-Figure 8: Model predicted PCS-SF compared between diagnostic groups - region labels
 
 Pairwise comparisons revealed small effect sizes in differences between Regions (Table 5).
 
-Table 5: Pairwise comparisons between regions for model-predicted averages of PCS-SF.
+Table 5:
 
 ```{r}
+#| label: tbl-FAOS-comp
+#| tbl-cap: "Pairwise comparisons between regions for model-predicted averages of FAOS Pain"
 
 
-PCSComp <- avg_comparisons(
-  PCSMod,
+FAOSComp <- avg_comparisons(
+  FAOSMod,
   newdata = "marginalmeans",
   variables = list(Region = "pairwise"),
   conf_level = 0.95
@@ -2201,7 +2202,7 @@ PCSComp <- avg_comparisons(
   )
 
 
-knitr::knit_print(PCSComp)
+knitr::knit_print(FAOSComp)
 
 ```
 
