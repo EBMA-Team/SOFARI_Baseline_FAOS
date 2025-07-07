@@ -2134,9 +2134,11 @@ Figure 7: PCS-SF Total Score by Diagnostic Group
 
 <!--# (a) Give unadjusted estimates and, if applicable, confounder-adjusted estimates and their precision (eg, 95% confidence interval). Make clear which confounders were adjusted for and why they were included. (b) Report category boundaries when continuous variables were categorized. (c) If relevant, consider translating estimates of relative risk into absolute risk for a meaningful time period -->
 
-Table 4: Summary of regression assessing the effect of region on PCS-SF adjusted for confounders.
-
 ```{r}
+#| label: tbl-faosfit
+#| tbl-cap: "Summary of regression assessing the effect of region on FAOS-Pain adjusted for confounders."
+
+
 FAOSfit <- gtsummary::tbl_regression(
   FAOSMod,
   tidy_fun = pool_and_tidy_mice,
@@ -2152,7 +2154,7 @@ knitr::knit_print(FAOSfit)
 
 ```{epoxy}
 
-Analysis of FAOS pain scores revealed significant differences across anatomical regions (Table 5), after adjustment for demographic characteristics and patient-reported health measures. Compared to ankle conditions (reference group), patients with forefoot (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Forefoot")}) and foot (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Foot")}) and multiple region involvement (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Multiple")}) demonstrated lower disability from pain at baseline. The model adjusted for age, sex, bilateral presentation status, comorbidity burden, and physical and mental health component scores. This suggests that anatomical location of the condition may be independently associated with baseline pain catastrophizing, with rearfoot conditions showing the strongest association.
+Analysis of FAOS pain scores revealed significant differences across anatomical regions @tbl-faosfit, after adjustment for demographic characteristics and patient-reported health measures. Compared to ankle conditions (reference group), patients with forefoot (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Forefoot")}) and foot (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Foot")}) and multiple region involvement (β = {gtsummary::inline_text(FAOSfit, variable = "Region", level = "Multiple")}) demonstrated lower disability from pain at baseline. The model adjusted for age, sex, bilateral presentation status, comorbidity burden, and physical and mental health component scores. This suggests that anatomical location of the condition may be independently associated with baseline pain catastrophizing, with rearfoot conditions showing the strongest association.
 
 ```
 
@@ -2171,16 +2173,13 @@ FAOSPredict <- marginaleffects::predictions(
 ```{r}
 #| label: fig-faos-predict
 #| fig-cap: "Model predicted FAOS-Pain compared between diagnostic groups - region labels"
+
 FAOSprPlot2 <- ggplot(data = FAOSPredict, mapping = aes(y = Region, x = FAOS_Pain_TotalScore_Preop)) + stat_slabinterval(aes(thickness = after_stat(pdf*n)), scale = 0.7) +
   stat_dotsinterval(side = "bottom", scale = 0.7, slab_linewidth = NA) +
   scale_fill_brewer(palette = "Set2") 
 
 knitr::knit_print(FAOSprPlot2)
 ```
-
-Pairwise comparisons revealed small effect sizes in differences between Regions (Table 5).
-
-Table 5:
 
 ```{r}
 #| label: tbl-FAOS-comp
@@ -2189,7 +2188,7 @@ Table 5:
 
 FAOSComp <- avg_comparisons(
   FAOSMod,
-  newdata = "marginalmeans",
+  newdata = "mean",
   variables = list(Region = "pairwise"),
   conf_level = 0.95
 ) |> dplyr::select(
@@ -2206,24 +2205,6 @@ knitr::knit_print(FAOSComp)
 
 ```
 
-Table 6: Comparisons of model-predicted PCS categorised based on Cheng et al threshold (x = 7), compared between Regions.
-
-```{r}
-
-PCSCatTable <- tbl_summary(
-  PCSPredict |> dplyr::select(
-    Region,
-    PCSCat
-  ),
-  by = Region,
-  label = list(
-    PCSSF_TotalScore_Preop = "PCS Total",
-    PCSCat = "PCS >= 7"),
-) |> add_overall() |> add_p()
-
-knitr::knit_print(PCSCatTable)
-
-```
 
 ## RECORD \[17\] Other analyses
 
@@ -2231,78 +2212,13 @@ knitr::knit_print(PCSCatTable)
 
 <!--# Maybe rerun PCSCat with PCSCat included in mice as passive imputation -->
 
-*PCS against VRMCSCat*
 
-The model-predicted PCS-SF was assessed against the VR12-MCS cutoff (x = 40).
-
-```{r}
-
-PCSPredict2 <- PCSPredict |> mutate(
-  VR12Cat = if_else(
-    VR12_Mental_TotalScore_Preop <= 40, "Yes", "No"
-  )
-)
-
-```
-
-```{r}
-roc.VR12 <- pROC::roc(
-  PCSPredict2$VR12Cat, 
-  PCSPredict2$PCSSF_TotalScore_Preop,
-  percent=TRUE,
-  # arguments for ci
-  ci=TRUE, boot.n=100, ci.alpha=0.9, stratified=FALSE
-  )
-
-plot(
-  roc.VR12,
-  print.auc=TRUE,
-  show.thres=TRUE,
-  print.thres = TRUE
-  )
-
-sens.ci <- pROC::ci.se(roc.VR12, specificities=seq(0, 100, 5))
-plot(sens.ci, type="shape", col="lightblue")
-
-```
-
-Figure 9: Receiver operating characteristic curve for PCS-SF score against the VR12-MCS threshold for poor surgical outcomes (x = 40).
-
-Table 7: Summary of PCS-SF exceeding ROC threshold (10.5) by diagnostic group
-
-```{r}
-
-PCSPredict3 <- PCSPredict2 |> dplyr::mutate(
-  PCSCat2 = if_else(
-    PCSSF_TotalScore_Preop >= 10.5, "Yes","No"
-)
-)
-
-PCSCatTable2 <- tbl_summary(
-  PCSPredict3 |> dplyr::select(
-    Region,
-    PCSCat2
-  ),
-  by = Region,
-  label = list(
-    PCSCat = "PCS >= 10.5"),
-) |> add_overall() |> add_p()
-
-knitr::knit_print(PCSCatTable2)
-
-```
 
 # Discussion
 
 ## RECORD \[18\] Key results
 
-<!--# Summarise key results with reference to study objectives -->
 
-The average pain catastrophizing score was low in foot and ankle pathology presenting for surgical review. The average did not differ by a meaningful amount (low effect size) between anatomical regions of presentation.
-
-The incidence of clinically significant catastrophising was \~50% (high?) and did not differ between anatomical regions by a meaningful amount (low effect size).
-
-A threshold of 10.5 points on the PCS-SF was 78.6% sensitive and 62.7% specific for VR12-MCS being at or below the threshold (X = 40).
 
 ## RECORD \[19\] Limitations
 
@@ -2310,7 +2226,7 @@ A threshold of 10.5 points on the PCS-SF was 78.6% sensitive and 62.7% specific 
 
 -   First presentation to registry did not guarantee first presentation to clinic
 -   Region on its own may not be sufficient to represent differences between clinical sub-groups presenting for surgical review in this population
--   The thresholds for PCS-SF and VR12-MCS were not derived from foot and ankle populations.
+-   The thresholds for VR12-MCS were not derived from foot and ankle populations.
 
 ### RECORD \[19.1\] Implications of non-specific data
 
@@ -2322,19 +2238,13 @@ A threshold of 10.5 points on the PCS-SF was 78.6% sensitive and 62.7% specific 
 
 <!--# Give a cautious overall interpretation of results considering objectives, limitations, multiplicity of analyses, results from similar studies, and other relevant evidence -->
 
-Pain catastrophisation may not be associated with patterns of pathology presenting for surgical review in specialist clinics within a metropolitan and regional setting.
 
-The incidence of clinically relevant pain catastrophising may be relatively high in foot and ankle patients as a proportion of cases presenting for review.
-
-A PCS-SF total score above 9.5 may be associated with a VR12-MCS (overall mental health) score that is in turn associated with poor surgical outcomes.
 
 ## RECORD \[21\] Generalisability
 
 <!--# Discuss the generalisability (external validity) of the study results -->
 
-The paper on which this analysis is modelled [@hampton2019], used an arbitrary cutoff (x = 30), with no precedent or citation, to define significant catastrophisation in their cohort of hip pathology patients. This would be considered high in the context of Cheng et al. The cutoff utilised in the present study was originally derived by [@cheng2019] using receiver-operator characteristic curves with the PCS-SF total score was regressed against a threshold of clinical depression.
 
-The threshold for clinically relevant PCS-SF may be different depending on the target classification used (clinical depression vs low VR12-MCS).
 
 # Other information
 
